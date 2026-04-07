@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import platform
 from pathlib import Path
+from typing import Optional
 
 
 def get_project_root() -> Path:
@@ -64,7 +65,8 @@ def is_jetson() -> bool:
     return False
 
 
-def read_jetson_gpu_percent() -> float | None:
+def read_jetson_gpu_percent():
+    # type: () -> Optional[float]
     candidates = [
         "/sys/class/devfreq/17000000.ga10b/load",
         "/sys/class/devfreq/17000000.gv11b/load",

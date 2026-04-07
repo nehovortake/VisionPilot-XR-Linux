@@ -1,6 +1,7 @@
 # weather_detection.py
 import cv2
 import numpy as np
+from typing import Tuple
 
 # === WEATHER SAMPLING CONFIG ===
 WEATHER_EVERY_N_FRAMES = 10   # ako často robiť ťažšie výpočty (štandardne každých 10 frame)
@@ -32,7 +33,8 @@ def reset_weather_state():
     _cand_votes = 0
 
 
-def _quick_stats(bgr: np.ndarray) -> tuple[float, float, float]:
+def _quick_stats(bgr):
+    # type: (np.ndarray) -> Tuple[float, float, float]
     """Rýchle štatistiky z obrazu (downscale + horná časť)."""
     h, w = bgr.shape[:2]
 

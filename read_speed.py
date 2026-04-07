@@ -228,10 +228,11 @@ class PerceptronSpeedReader:
     # ==================================================
     # MAIN API – CALL THIS FROM IMAGE PROCESSOR
     # ==================================================
-    def predict_from_crop(self, crop_bgr: np.ndarray) -> int | None:
+    def predict_from_crop(self, crop_bgr: np.ndarray):
+        # type: (np.ndarray) -> Optional[int]
         """
         crop_bgr : np.ndarray (BGR) – ellipse crop
-        return   : int | None (speed km/h)
+        return   : Optional[int] (speed km/h)
         """
         try:
             if crop_bgr is None or crop_bgr.size == 0:

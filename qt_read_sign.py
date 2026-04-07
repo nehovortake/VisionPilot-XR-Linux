@@ -9,6 +9,7 @@
 from __future__ import annotations
 from pathlib import Path
 from collections import deque
+from typing import Optional
 
 from vp_runtime import dataset_root
 
@@ -229,10 +230,11 @@ class PerceptronSpeedReader:
     # ==================================================
     # MAIN API – CALL THIS FROM IMAGE PROCESSOR
     # ==================================================
-    def predict_from_crop(self, crop_bgr: np.ndarray) -> int | None:
+    def predict_from_crop(self, crop_bgr: np.ndarray):
+        # type: (np.ndarray) -> Optional[int]
         """
         crop_bgr : np.ndarray (BGR) – ellipse crop
-        return   : int | None (speed km/h)
+        return   : Optional[int] (speed km/h)
         """
         try:
             if crop_bgr is None or crop_bgr.size == 0:

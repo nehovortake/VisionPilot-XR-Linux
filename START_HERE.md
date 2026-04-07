@@ -1,8 +1,38 @@
-# 🎉 VISIONPILOT XR - JETSON ORIN NANO - DEPLOYMENT COMPLETE
+# 🎉 VISIONPILOT XR - JETSON ORIN NANO - DEPLOYMENT (Python 3.8)
 
-## ✅ STATUS: HOTOVO
+## ✅ STATUS: HOTOVO - PYTHON 3.8 COMPATIBLE
 
-Váš projekt **VisionPilot XR** je teraz plne pripravený na beh na **NVIDIA Jetson Orin Nano**.
+Váš projekt **VisionPilot XR** je teraz plne pripravený na beh na **NVIDIA Jetson Orin Nano** s **Python 3.8.10**.
+
+---
+
+## 📋 ⚠️ DÔLEŽITÉ - PYTHON 3.8 REQUIREMENTS
+
+**Táto verzia je optimalizovaná pre:**
+- ✅ **Python 3.8.10** (Jetson default)
+- ✅ **PyTorch 1.13.1** (ARM64, Python 3.8 compatible)
+- ✅ **CUDA 11.8** (Jetson Orin Nano)
+- ✅ Všetky knižnice sú Python 3.8 compatible
+
+---
+
+## 🚀 SUPER RÝCHLY START - 3 KROKY
+
+```bash
+# Krok 1: SSH na Jetson
+ssh ubuntu@jetson.local
+
+# Krok 2: Automatická inštalácia (Python 3.8)
+cd ~/VisionPilot-XR-Linux
+bash install_jetson.sh
+
+# Krok 3: Spustenie GUI
+source ~/visionpilot/bin/activate
+export DISPLAY=:0
+python gui.py
+```
+
+**HOTOVO! 🎉**
 
 ---
 
@@ -28,23 +58,6 @@ Váš projekt **VisionPilot XR** je teraz plne pripravený na beh na **NVIDIA Je
 
 ---
 
-## 🚀 SUPER RÝCHLY START - 3 KROKY
-
-```bash
-# Krok 1: SSH na Jetson
-ssh ubuntu@jetson.local
-
-# Krok 2: Automatická inštalácia
-bash install_jetson.sh
-
-# Krok 3: Spustenie GUI
-export DISPLAY=:0
-python3 gui.py
-```
-
-**HOTOVO! 🎉**
-
----
 
 ## 📁 ČÍTAJ PODĽA SITUÁCIE
 

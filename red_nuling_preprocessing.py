@@ -14,6 +14,7 @@ CLI:
 from __future__ import annotations
 import cv2
 import numpy as np
+from typing import Optional, Dict
 
 
 def keep_only_red(
@@ -63,7 +64,8 @@ def keep_only_red(
 
     return color_mask
 
-def get_red_null_params(weather: str | None) -> dict:
+def get_red_null_params(weather):
+    # type: (Optional[str]) -> Dict
     """
     Fast, safe red-null parameter set.
     Only parameters that actually affect RGB red nulling.

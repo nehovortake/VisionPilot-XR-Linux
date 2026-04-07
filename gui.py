@@ -9,6 +9,7 @@ import numpy as np
 import io
 import wave
 import struct
+from typing import Union, Optional, Dict
 
 try:
     from elm327_can_speed import ELM327SpeedReader
@@ -426,7 +427,8 @@ class SpeedWeatherPanel(QFrame):
     - Weather was moved to a separate panel (WeatherPanel).
     """
 
-    def __init__(self, parent=None, sign_icon_dir_path: str | None = None):
+    def __init__(self, parent=None, sign_icon_dir_path=None):
+        # type: (Optional, Optional[str]) -> None
         super().__init__(parent)
 
         self.setAttribute(Qt.WA_StyledBackground, True)
@@ -438,8 +440,8 @@ class SpeedWeatherPanel(QFrame):
         self._sign_icon_dir = str(Path(sign_icon_dir_path) if sign_icon_dir_path else default_dir)
 
         # cache pixmaps so we don't hit disk every frame
-        self._sign_cache: dict[int, QPixmap] = {}
-        self._last_sign_val: int | None = None
+        self._sign_cache: Dict[int, QPixmap] = {}
+        self._last_sign_val: Optional[int] = None
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -513,7 +515,8 @@ class SpeedWeatherPanel(QFrame):
         except Exception:
             self.lbl_speed.setText("--")
 
-    def _find_sign_path(self, v: int) -> str | None:
+    def _find_sign_path(self, v: int):
+        # type: (int) -> Optional[str]
         """
         Finds file by exact expected name '{v}e.png' (preferred).
         If missing, tries '{v}e.*' (png/jpg/webp/etc).
@@ -541,7 +544,8 @@ class SpeedWeatherPanel(QFrame):
 
         return None
 
-    def set_sign(self, kmh: float | int | None):
+    def set_sign(self, kmh):
+        # type: (Union[float, int, None]) -> None
         """
         Update sign icon based on detected speed (e.g. 20 -> 20e.png).
         Call this each frame if you want; internally it updates only on change.
@@ -820,7 +824,8 @@ class PerformancePanel(QFrame):
         self._animating = False
         self.hide()
 
-    def set_process_ms(self, ms: float | None):
+    def set_process_ms(self, ms):
+        # type: (Optional[float]) -> None
         self._proc_ms = ms
         if ms is None:
             self.val_proc_ms.setText("-- ms")
@@ -830,7 +835,8 @@ class PerformancePanel(QFrame):
             except Exception:
                 self.val_proc_ms.setText("-- ms")
 
-    def set_cpu_percent(self, pct: float | None):
+    def set_cpu_percent(self, pct):
+        # type: (Optional[float]) -> None
         self._cpu_percent = pct
         if pct is None:
             self.val_cpu.setText("-- %")
@@ -840,7 +846,8 @@ class PerformancePanel(QFrame):
             except Exception:
                 self.val_cpu.setText("-- %")
 
-    def set_gpu_percent(self, pct: float | None):
+    def set_gpu_percent(self, pct):
+        # type: (Optional[float]) -> None
         self._gpu_percent = pct
         if pct is None:
             self.val_gpu.setText("--")
@@ -850,7 +857,8 @@ class PerformancePanel(QFrame):
             except Exception:
                 self.val_gpu.setText("--")
 
-    def set_vram_mb(self, mb: float | None):
+    def set_vram_mb(self, mb):
+        # type: (Optional[float]) -> None
         self._vram_mb = mb
         if mb is None:
             self.val_vram.setText("-- MB")
