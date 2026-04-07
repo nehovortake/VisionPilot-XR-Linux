@@ -96,5 +96,5 @@ echo ""
 echo "Next steps:"
 echo "  source ~/visionpilot/bin/activate"
 echo "  cd ~/VisionPilot-XR-Linux"
-echo "  python gui.py"
+echo "  python visionpilot_headless.py"
 
