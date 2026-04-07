@@ -1,0 +1,98 @@
+# JETSON FIX - Copy & Paste Instructions
+
+## Problem Summary
+- ❌ Virtual environment wasn't created
+- ❌ PyTorch 2.4.1 installed instead of 1.13.1 (wrong version for Jetson!)
+- ❌ gui.py has encoding error (Non-ASCII characters)
+- ❌ Display/X11 not available
+
+## Fix - Copy & Paste These Commands
+
+### On Jetson Terminal:
+
+```bash
+# 1. Make sure you're in the project directory
+cd ~/VisionPilot-XR-Linux
+
+# 2. Run the fix script
+bash jetson_fix.sh
+
+# This will:
+# - Create proper Python 3.8 virtual environment
+# - Remove wrong PyTorch 2.4.1
+# - Install correct PyTorch 1.13.1 (ARM64)
+# - Install all dependencies
+# - Verify everything works
+
+# Takes: ~10-15 minutes (mostly PyTorch download)
+```
+
+### After fix completes:
+
+```bash
+# 3. Activate virtual environment
+source ~/visionpilot/bin/activate
+
+# 4. Try running GUI (if display available)
+export DISPLAY=:0
+python gui.py
+
+# If GUI fails with X11 error, run headless:
+python vp_runtime.py
+
+# Or run tests
+python jetson_test.py
+```
+
+---
+
+## If You Don't Have jetson_fix.sh
+
+Run these commands manually:
+
+```bash
+# Create venv
+python3.8 -m venv ~/visionpilot
+source ~/visionpilot/bin/activate
+
+# Upgrade pip
+pip install --upgrade pip setuptools wheel
+
+# Remove wrong PyTorch
+pip uninstall -y torch torchvision torchaudio
+
+# Install correct PyTorch 1.13.1
+pip install torch==1.13.1 torchvision==0.14.1 torchaudio==0.13.1 \
+    --index-url https://download.pytorch.org/whl/cu118
+
+# Install dependencies
+pip install -r requirements_jetson.txt
+
+# Verify
+python -c "import torch; print(torch.__version__); print(torch.cuda.is_available())"
+```
+
+---
+
+## Expected Output After Fix
+
+```
+✅ PyTorch version: 1.13.1
+✅ CUDA available: True
+✅ CUDA device: NVIDIA Jetson Orin Nano
+✅ OpenCV 4.6.0
+✅ PyQt5 installed
+```
+
+---
+
+## Then Try GUI:
+
+```bash
+source ~/visionpilot/bin/activate
+cd ~/VisionPilot-XR-Linux
+python gui.py
+```
+
+If X11 fails, that's OK - run headless (CLI only)
+
