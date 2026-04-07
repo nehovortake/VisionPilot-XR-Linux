@@ -9,6 +9,13 @@ echo "🔧 VisionPilot XR - Jetson Fix Script"
 echo "======================================"
 echo ""
 
+# FIRST: Install missing system packages
+echo "0. Installing missing system packages..."
+sudo apt-get update
+sudo apt-get install -y python3.8-venv python3.8-dev build-essential
+echo "   ✓ System packages installed"
+echo ""
+
 # Check Python
 echo "1. Python version:"
 python3.8 --version
