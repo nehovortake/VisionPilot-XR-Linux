@@ -6,19 +6,30 @@ Runs all image processing pipelines without GUI
 Jetson Orin Nano Compatible (Python 3.8+)
 """
 
+# CRITICAL: LD_PRELOAD must be set FIRST, before ANY imports
 import os
 import sys
 import platform
+import ctypes
 
 # FIX: LD_PRELOAD for PyTorch on Jetson with Python 3.8
 # (solves: "cannot allocate memory in static TLS block")
 if platform.system() == 'Linux':
+    # Try to preload libgomp to avoid TLS memory conflict
     for lib_path in [
         '/usr/lib/aarch64-linux-gnu/libgomp.so.1',
         '/usr/lib/aarch64-linux-gnu/libgomp.so',
         '/usr/lib/libgomp.so.1',
     ]:
         if os.path.exists(lib_path):
+            try:
+                # Try to load it directly into current process
+                ctypes.CDLL(lib_path, mode=ctypes.RTLD_GLOBAL)
+                print(f"[INIT] Preloaded: {lib_path}")
+            except Exception as e:
+                print(f"[INIT] Could not preload {lib_path}: {e}")
+
+            # Also set env var
             os.environ['LD_PRELOAD'] = lib_path
             break
 import time

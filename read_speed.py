@@ -1,4 +1,4 @@
-# qt_read_sign.py (pôvodný - funguje správne!)
+# qt_read_sign.py
 # ------------------------------------------------------
 # MLP (PyTorch) reader – reads speed from ellipse crop (BGR)
 # - loads: dataset/mlp_speed_model.pt
@@ -167,7 +167,7 @@ if TORCH_AVAILABLE:
             # ==========================
             self.pred_hist = deque(maxlen=7)  # last N confident predictions
             self.last_stable: int | None = None
-            self.min_margin = 0.15            # confidence threshold (top1-top2) - lowered from 0.35
+            self.min_margin = 0.35            # confidence threshold (top1-top2)
             self.min_votes = 4                # votes required to accept winner
 
             self._load_model(model_path)
@@ -255,7 +255,6 @@ if TORCH_AVAILABLE:
                 best_label: int | None = None
                 best_margin: float = -1e9
                 best_maxlogit: float = -1e9
-                variant_count = 0
 
                 # try multiple preprocessing variants and pick the most confident
                 for _name, cfg in RUNTIME_PREPROCESS_VARIANTS:
@@ -285,17 +284,10 @@ if TORCH_AVAILABLE:
 
                     logits = out.squeeze(0).cpu().numpy()
                     idx = int(np.argmax(logits))
-
-                    # Validate index is within range
-                    if idx < 0 or idx >= len(self.labels):
-                        continue
-
                     pred_label = int(self.labels[idx])
 
                     margin = self._margin_top1_top2(logits)
                     maxlogit = float(logits[idx])
-
-                    variant_count += 1
 
                     # pick: higher margin, tie-break by higher maxlogit
                     if (margin > best_margin) or (margin == best_margin and maxlogit > best_maxlogit):
@@ -305,15 +297,12 @@ if TORCH_AVAILABLE:
 
                 # nothing worked
                 if best_label is None:
-                    # DEBUG: No label found
                     return self.last_stable
 
                 # ==========================
-                # 1) CONFIDENCE GATE (margin check)
+                # 1) CONFIDENCE GATE
                 # ==========================
                 if best_margin < self.min_margin:
-                    # DEBUG: Margin too low - prediction rejected
-                    # print(f"[MLP-DEBUG] Margin {best_margin:.3f} < {self.min_margin} - rejected")
                     return self.last_stable
 
                 # ==========================
@@ -341,7 +330,6 @@ else:
     # PyTorch not available - provide dummy class
     class PerceptronSpeedReader:
         def __init__(self, *args, **kwargs):
-            # Silent initialization - warning already shown at import time
             self.model = None
 
         def predict_from_crop(self, crop_bgr):
