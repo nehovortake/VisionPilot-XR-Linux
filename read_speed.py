@@ -305,12 +305,15 @@ if TORCH_AVAILABLE:
 
                 # nothing worked
                 if best_label is None:
+                    # DEBUG: No label found
                     return self.last_stable
 
                 # ==========================
-                # 1) CONFIDENCE GATE
+                # 1) CONFIDENCE GATE (margin check)
                 # ==========================
                 if best_margin < self.min_margin:
+                    # DEBUG: Margin too low - prediction rejected
+                    # print(f"[MLP-DEBUG] Margin {best_margin:.3f} < {self.min_margin} - rejected")
                     return self.last_stable
 
                 # ==========================
