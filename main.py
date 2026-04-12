@@ -46,25 +46,9 @@ if IS_JETSON:
 # Python version
 PYTHON_VERSION = f"{sys.version_info.major}.{sys.version_info.minor}"
 
-# GPU monitoring function - collect actual GPU usage
-def get_gpu_usage():
-    """Get GPU usage on Jetson or system with NVIDIA GPU."""
-    try:
-        # Try nvidia-smi for NVIDIA GPU
-        result = subprocess.run(
-            ["nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            universal_newlines=True,
-            timeout=1
-        )
-        if result.returncode == 0:
-            gpu_percent = float(result.stdout.strip().split('\n')[0])
-            return gpu_percent
-    except Exception:
-        pass
-
-    # Fallback to psutil CPU if GPU not available
+# CPU monitoring function
+def get_cpu_usage():
+    """Get CPU usage using psutil or psutil fallback."""
     if psutil is not None:
         try:
             return psutil.cpu_percent(interval=0.001)
@@ -124,8 +108,8 @@ class PipelineState:
         self.start_time = None
         self.current_frame = None
 
-        # GPU monitoring
-        self.gpu_samples = []
+        # CPU monitoring
+        self.cpu_samples = []
         self.timestamps = []
 
 state = PipelineState()
@@ -413,6 +397,10 @@ def process_frame():
         state.detected_sign = detected_sign
         state.sign_detected_status = sign_detected  # Track detection separately from speed
 
+        # DEBUG: Print detection status
+        if sign_detected_this_frame:
+            print(f"[DEBUG] Detected: {sign_detected}, Speed: {detected_sign}")  # DEBUG
+
         # Also store ellipse center for visualization
         if hasattr(state.processor, 'last_sign_center'):
             state.sign_center = state.processor.last_sign_center
@@ -431,10 +419,10 @@ def process_frame():
             state.last_sign_print = detected_sign
             state.last_detected_value = detected_sign
 
-        # Record GPU usage every frame (not just every 0.5s)
-        gpu_percent = get_gpu_usage()
-        if gpu_percent >= 0:
-            state.gpu_samples.append(gpu_percent)
+        # Record CPU usage every frame (not just every 0.5s)
+        cpu_percent = get_cpu_usage()
+        if cpu_percent >= 0:
+            state.cpu_samples.append(cpu_percent)
             state.timestamps.append(time.time() - state.start_time)
 
         state.frame_count += 1
@@ -516,28 +504,28 @@ def shutdown():
     # Clear the terminal line before showing final stats
     print("\n\n")
 
-    # Display GPU graph
+    # Display CPU graph
     print("[MAIN] ============================================")
-    print("[MAIN] Generating GPU usage graph...")
+    print("[MAIN] Generating CPU usage graph...")
     print("[MAIN] ============================================\n")
 
-    if plt is not None and len(state.gpu_samples) > 0:
+    if plt is not None and len(state.cpu_samples) > 0:
         try:
             plt.figure(figsize=(12, 6))
-            plt.plot(state.timestamps, state.gpu_samples, 'r-', linewidth=2, label='GPU Usage')
+            plt.plot(state.timestamps, state.cpu_samples, 'b-', linewidth=2, label='CPU Usage')
             plt.xlabel('Time (seconds)', fontsize=12)
-            plt.ylabel('GPU Usage (%)', fontsize=12)
-            plt.title('GPU Usage During VisionPilot XR Execution', fontsize=14, fontweight='bold')
+            plt.ylabel('CPU Usage (%)', fontsize=12)
+            plt.title('CPU Usage During VisionPilot XR Execution', fontsize=14, fontweight='bold')
             plt.grid(True, alpha=0.3)
             plt.legend(fontsize=11)
             plt.ylim(0, 100)
 
             # Add statistics
-            avg_gpu = np.mean(state.gpu_samples)
-            max_gpu = np.max(state.gpu_samples)
-            min_gpu = np.min(state.gpu_samples)
+            avg_cpu = np.mean(state.cpu_samples)
+            max_cpu = np.max(state.cpu_samples)
+            min_cpu = np.min(state.cpu_samples)
 
-            stats_text = f'Avg: {avg_gpu:.1f}% | Max: {max_gpu:.1f}% | Min: {min_gpu:.1f}%'
+            stats_text = f'Avg: {avg_cpu:.1f}% | Max: {max_cpu:.1f}% | Min: {min_cpu:.1f}%'
             plt.text(0.5, 0.95, stats_text, transform=plt.gca().transAxes,
                     ha='center', va='top', fontsize=11, bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
 
@@ -546,7 +534,7 @@ def shutdown():
             # Save graph
             log_dir = os.path.join(os.path.dirname(__file__), "log_files")
             os.makedirs(log_dir, exist_ok=True)
-            graph_file = os.path.join(log_dir, f"gpu_graph_{time.strftime('%Y-%m-%d_%H-%M-%S')}.png")
+            graph_file = os.path.join(log_dir, f"cpu_graph_{time.strftime('%Y-%m-%d_%H-%M-%S')}.png")
             plt.savefig(graph_file, dpi=100)
             print(f"[MAIN] Graph saved to: {graph_file}\n")
 
@@ -556,20 +544,20 @@ def shutdown():
             except Exception:
                 pass
 
-            print(f"[MAIN] GPU Statistics:")
-            print(f"[MAIN]   - Average GPU: {avg_gpu:.2f}%")
-            print(f"[MAIN]   - Max GPU: {max_gpu:.2f}%")
-            print(f"[MAIN]   - Min GPU: {min_gpu:.2f}%")
-            print(f"[MAIN]   - Total samples: {len(state.gpu_samples)}")
+            print(f"[MAIN] CPU Statistics:")
+            print(f"[MAIN]   - Average CPU: {avg_cpu:.2f}%")
+            print(f"[MAIN]   - Max CPU: {max_cpu:.2f}%")
+            print(f"[MAIN]   - Min CPU: {min_cpu:.2f}%")
+            print(f"[MAIN]   - Total samples: {len(state.cpu_samples)}")
             if len(state.timestamps) > 0:
                 print(f"[MAIN]   - Runtime: {state.timestamps[-1]:.2f}s")
             print("[MAIN] ============================================\n")
         except Exception as e:
-            print(f"[MAIN] Error displaying GPU graph: {e}\n")
+            print(f"[MAIN] Error displaying CPU graph: {e}\n")
     elif plt is None:
         print("[MAIN] ⚠ matplotlib not installed, cannot display graph\n")
     else:
-        print("[MAIN] ⚠ No GPU data collected\n")
+        print("[MAIN] ⚠ No CPU data collected\n")
 
     # Display final status
     print("\n[MAIN] ============================================")
