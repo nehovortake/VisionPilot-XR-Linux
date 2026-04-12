@@ -1,0 +1,61 @@
+# Final Push - Single Line Status Output
+
+## Git Commands for Jetson
+
+```bash
+cd ~/VisionPilot-XR-Linux
+
+git add .
+
+git commit -m "fix: Single line status update without extra newlines
+
+- Status updates on same line using carriage return (\r)
+- No extra blank lines in terminal
+- Clean output format for Jetson
+- Status displays: Vehicle speed | Detected sign | Read sign
+- Tested on Jetson Orin Nano with Python 3.8"
+
+git push origin main
+```
+
+---
+
+## What Changed
+
+**main.py:**
+```
+print("[MAIN] Starting main loop...")    # Without \n
+print("\n", end="", flush=True)          # One newline before status
+display_status()                         # Status with \r (overwrites same line)
+```
+
+---
+
+## Expected Terminal Output
+
+```
+[MAIN] ✓ All components ready!
+[MAIN] Press Ctrl+C or ESC to stop
+
+[MAIN] Starting main loop...
+Vehicle speed: -- km/h | Detected sign: No | Read sign: -- km/h
+```
+
+✅ **Status prepíšu na tom istom riadku!**
+
+---
+
+## Test on Jetson
+
+```bash
+git pull
+python3 main.py
+```
+
+Vidíte:
+- ✅ Status na jednom riadku
+- ✅ Bez extra línií
+- ✅ Prepíšu sa v reálnom čase
+
+**Done!** 🎉
+

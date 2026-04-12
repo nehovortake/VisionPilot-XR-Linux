@@ -121,6 +121,7 @@ class PipelineState:
 
         self.vehicle_speed = 0
         self.detected_sign = None
+        self.sign_detected_status = False  # Track if sign was detected (separate from speed)
         self.sign_center = None
         self.last_vehicle_speed_print = 0
         self.last_sign_print = None
@@ -152,8 +153,10 @@ def on_vehicle_speed_received(speed_kmh):
 
 def display_status():
     """Display vehicle speed, detected sign status, and read sign value on one line."""
-    detected_bool = state.detected_sign is not None
-    detected_text = "Yes" if detected_bool else "No"
+    # Show detection status (True if sign detected, regardless of speed classification)
+    detected_text = "Yes" if state.sign_detected_status else "No"
+
+    # Show read speed (only if both detected AND classified)
     read_sign_text = f"{state.detected_sign}" if state.detected_sign is not None else "--"
 
     status_line = f"Vehicle speed: {state.vehicle_speed} km/h | Detected sign: {detected_text} | Read sign: {read_sign_text} km/h"
@@ -396,14 +399,23 @@ def process_frame():
         if result_img is None:
             return False
 
-        # Get detected sign only if it was detected in THIS frame
+        # Get detection status (sign found or not)
         sign_detected_this_frame = getattr(state.processor, 'sign_detected_this_frame', False)
-        if sign_detected_this_frame and hasattr(state.processor, 'last_speed'):
+
+        # Get speed if available (requires MLP)
+        if sign_detected_this_frame and hasattr(state.processor, 'last_speed') and state.processor.last_speed is not None:
             detected_sign = state.processor.last_speed
+            sign_detected = True
+        elif sign_detected_this_frame:
+            # Sign detected but speed classification not available (e.g., no PyTorch)
+            detected_sign = None
+            sign_detected = True
         else:
             detected_sign = None
+            sign_detected = False
 
         state.detected_sign = detected_sign
+        state.sign_detected_status = sign_detected  # Track detection separately from speed
 
         # Also store ellipse center for visualization
         if hasattr(state.processor, 'last_sign_center'):
@@ -441,12 +453,17 @@ def process_frame():
 
 def run():
     """Main processing loop."""
-    print("[MAIN] Starting main loop...\n")
+    print("[MAIN] Starting main loop...")
 
     state.running = True
     state.start_time = time.time()
 
     frame_times = []
+    last_status_display = 0  # Track when we last displayed status
+
+    # Display initial status
+    print("\n", end="", flush=True)  # New line before status
+    display_status()
 
     try:
         while state.running:
@@ -461,6 +478,12 @@ def run():
             # Keep only last 100 frame times
             if len(frame_times) > 100:
                 frame_times.pop(0)
+
+            # Display status every 0.5 seconds even if nothing changed
+            current_time = time.time()
+            if current_time - last_status_display > 0.5:
+                display_status()
+                last_status_display = current_time
 
             # Sleep a bit to prevent 100% CPU
             time.sleep(0.001)
