@@ -289,9 +289,10 @@ class VisionPilotWindow(QMainWindow):
         # Update labels
         self.vehicle_speed_label.setText(f"Vehicle speed: {state.vehicle_speed} km/h")
 
-        detected_text = "Yes" if state.detected_sign is not None else "No"
+        # Use sign_detected_status (True if sign found) instead of checking detected_sign
+        detected_text = "Yes" if getattr(state, 'sign_detected_status', False) else "No"
         self.detected_label.setText(f"Detected sign: {detected_text}")
-        if state.detected_sign is not None:
+        if getattr(state, 'sign_detected_status', False):
             self.detected_label.setStyleSheet("color: green;")
         else:
             self.detected_label.setStyleSheet("color: red;")
@@ -397,9 +398,6 @@ def process_frame():
         state.detected_sign = detected_sign
         state.sign_detected_status = sign_detected  # Track detection separately from speed
 
-        # DEBUG: Print detection status
-        if sign_detected_this_frame:
-            print(f"[DEBUG] Detected: {sign_detected}, Speed: {detected_sign}")  # DEBUG
 
         # Also store ellipse center for visualization
         if hasattr(state.processor, 'last_sign_center'):

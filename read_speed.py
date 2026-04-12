@@ -167,7 +167,7 @@ if TORCH_AVAILABLE:
             # ==========================
             self.pred_hist = deque(maxlen=7)  # last N confident predictions
             self.last_stable: int | None = None
-            self.min_margin = 0.35            # confidence threshold (top1-top2)
+            self.min_margin = 0.15            # confidence threshold (top1-top2) - lowered from 0.35
             self.min_votes = 4                # votes required to accept winner
 
             self._load_model(model_path)
