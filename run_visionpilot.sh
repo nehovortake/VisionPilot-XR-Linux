@@ -1,102 +1,52 @@
 #!/bin/bash
+# VisionPilot XR - Launcher
+# Fixes: cannot allocate memory in static TLS block (Jetson/aarch64)
+# LD_PRELOAD MUST be set before Python starts, not inside Python code
 
-# VisionPilot XR - Jetson Orin Nano Launcher Script
-#
-# This script sets up the environment and runs VisionPilot GUI on Jetson
-#
-# Usage:
-#   ./run_visionpilot.sh
-#   ./run_visionpilot.sh background   # Run in background
-
-set -e  # Exit on error
-
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
-
-# Configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VENV_PATH="$HOME/visionpilot"
-RUN_MODE="${1:-foreground}"
 
-echo -e "${GREEN}╔════════════════════════════════════════╗${NC}"
-echo -e "${GREEN}║  VisionPilot XR - Jetson Launcher     ║${NC}"
-echo -e "${GREEN}╚════════════════════════════════════════╝${NC}"
+# --- 1) system libgomp (Jetson aarch64) ---
+SYS_GOMP="/usr/lib/aarch64-linux-gnu/libgomp.so.1"
 
-# Check if venv exists
-if [ ! -d "$VENV_PATH" ]; then
-    echo -e "${RED}✗ Virtual environment not found: $VENV_PATH${NC}"
-    echo -e "${YELLOW}Please run setup first:${NC}"
-    echo "  python3.11 -m venv $VENV_PATH"
-    echo "  source $VENV_PATH/bin/activate"
-    echo "  pip install -r requirements.txt"
-    exit 1
+# --- 2) PyTorch bundled libgomp (exact path from your error) ---
+TORCH_GOMP_GLOB=$(python3 -c "
+import glob, sys
+pattern = '/home/*/.local/lib/python3.8/site-packages/torch/torch.libs/libgomp*.so*'
+matches = glob.glob(pattern)
+# also try site-packages/torch/lib/../torch.libs/
+pattern2 = '/home/*/.local/lib/python3.8/site-packages/torch.libs/libgomp*.so*'
+matches += glob.glob(pattern2)
+if matches:
+    print(matches[0])
+" 2>/dev/null)
+
+# fallback: hardcode from your error message
+if [ -z "$TORCH_GOMP_GLOB" ]; then
+    TORCH_GOMP_GLOB="/home/feit/.local/lib/python3.8/site-packages/torch/torch.libs/libgomp-6e1a1d1b.so.1.0.0"
 fi
 
-echo -e "${GREEN}✓ Virtual environment found${NC}"
+# --- 3) also preload libstdc++ ---
+STDCPP="/usr/lib/aarch64-linux-gnu/libstdc++.so.6"
 
-# Activate venv
-source "$VENV_PATH/bin/activate"
-echo -e "${GREEN}✓ Virtual environment activated${NC}"
-
-# Check Python
-PYTHON_VERSION=$(python3 --version 2>&1 | awk '{print $2}')
-echo -e "${GREEN}✓ Python ${PYTHON_VERSION}${NC}"
-
-# Check CUDA
-CUDA_CHECK=$(python3 -c "import torch; print('OK' if torch.cuda.is_available() else 'FAIL')" 2>/dev/null || echo "FAIL")
-if [ "$CUDA_CHECK" = "OK" ]; then
-    echo -e "${GREEN}✓ CUDA available${NC}"
-else
-    echo -e "${YELLOW}⚠ CUDA not available (CPU mode)${NC}"
-fi
-
-# Check camera
-CAMERA_CHECK=$(python3 -c "import pyrealsense2; ctx = pyrealsense2.context(); devices = ctx.query_devices(); print(devices.size())" 2>/dev/null || echo "0")
-echo -e "${GREEN}✓ RealSense cameras detected: ${CAMERA_CHECK}${NC}"
-
-# Check serial port
-if [ -c "/dev/ttyUSB0" ]; then
-    echo -e "${GREEN}✓ Serial port /dev/ttyUSB0 available${NC}"
-else
-    echo -e "${YELLOW}⚠ Serial port /dev/ttyUSB0 not found (ELM327 not connected)${NC}"
-fi
-
-# Set DISPLAY if not set
-if [ -z "$DISPLAY" ]; then
-    echo -e "${YELLOW}Setting DISPLAY=:0${NC}"
-    export DISPLAY=:0
-fi
-
-# Enable jetson_clocks for performance (optional)
-if command -v jetson_clocks &> /dev/null; then
-    echo -e "${YELLOW}Checking jetson_clocks...${NC}"
-    if ! sudo jetson_clocks 2>/dev/null; then
-        echo -e "${YELLOW}⚠ jetson_clocks failed (not critical)${NC}"
+# Build LD_PRELOAD
+PRELOAD=""
+for lib in "$SYS_GOMP" "$TORCH_GOMP_GLOB" "$STDCPP"; do
+    if [ -f "$lib" ]; then
+        if [ -z "$PRELOAD" ]; then
+            PRELOAD="$lib"
+        else
+            PRELOAD="$PRELOAD:$lib"
+        fi
+        echo "[LAUNCHER] Preloading: $lib"
     else
-        echo -e "${GREEN}✓ jetson_clocks enabled${NC}"
+        echo "[LAUNCHER] Not found (skip): $lib"
     fi
-fi
+done
 
-# Final checks
-echo -e "${GREEN}╔════════════════════════════════════════╗${NC}"
-echo -e "${GREEN}║  Environment Ready - Starting GUI     ║${NC}"
-echo -e "${GREEN}╚════════════════════════════════════════╝${NC}"
+export LD_PRELOAD="$PRELOAD"
+echo "[LAUNCHER] LD_PRELOAD=$LD_PRELOAD"
+echo "[LAUNCHER] Starting VisionPilot XR..."
 echo ""
 
-# Run application
-if [ "$RUN_MODE" = "background" ]; then
-    echo -e "${YELLOW}Starting in background mode...${NC}"
-    nohup python3 "$SCRIPT_DIR/gui.py" > /tmp/visionpilot.log 2>&1 &
-    PID=$!
-    echo -e "${GREEN}✓ VisionPilot running (PID: $PID)${NC}"
-    echo -e "${YELLOW}Check logs: tail -f /tmp/visionpilot.log${NC}"
-else
-    echo -e "${YELLOW}Starting in foreground mode...${NC}"
-    echo -e "${YELLOW}Press Ctrl+C to exit${NC}"
-    echo ""
-    python3 "$SCRIPT_DIR/gui.py"
-fi
-
+cd "$SCRIPT_DIR"
+exec python3 main.py "$@"

@@ -1,46 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-VisionPilot XR - Headless Main Script
-Runs all image processing pipelines without GUI
-Jetson Orin Nano Compatible (Python 3.8+)
+VisionPilot XR - Main Script
+OpenCV GUI (No PyQt5) + MLP Speed Reading
 """
 
-# CRITICAL: LD_PRELOAD must be set FIRST, before ANY imports
 import os
 import sys
 import platform
-import ctypes
-
-# FIX: LD_PRELOAD for PyTorch on Jetson with Python 3.8
-# (solves: "cannot allocate memory in static TLS block")
-if platform.system() == 'Linux':
-    # Try to preload libgomp to avoid TLS memory conflict
-    for lib_path in [
-        '/usr/lib/aarch64-linux-gnu/libgomp.so.1',
-        '/usr/lib/aarch64-linux-gnu/libgomp.so',
-        '/usr/lib/libgomp.so.1',
-    ]:
-        if os.path.exists(lib_path):
-            try:
-                # Try to load it directly into current process
-                ctypes.CDLL(lib_path, mode=ctypes.RTLD_GLOBAL)
-                print(f"[INIT] Preloaded: {lib_path}")
-            except Exception as e:
-                print(f"[INIT] Could not preload {lib_path}: {e}")
-
-            # Also set env var
-            os.environ['LD_PRELOAD'] = lib_path
-            break
 import time
-import threading
-import subprocess
 import cv2
 import numpy as np
 from pathlib import Path
-from PyQt5.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel
-from PyQt5.QtGui import QImage, QPixmap, QFont, QColor
-from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal
+
+# NOTE: LD_PRELOAD cannot be set from inside Python on Jetson/aarch64.
+# Use run_visionpilot.sh launcher instead which sets it before Python starts.
+# The original LD_PRELOAD block here was ineffective and has been removed.
+
+print(f"[INIT] LD_PRELOAD={os.environ.get('LD_PRELOAD', 'Not set')}")
 
 try:
     import psutil
@@ -52,332 +29,143 @@ try:
 except ImportError:
     plt = None
 
-# Platform detection
-IS_WINDOWS = platform.system() == "Windows"
-IS_LINUX = platform.system() == "Linux"
-IS_JETSON = IS_LINUX and os.path.exists("/etc/nv_tegra_release")
-
-# Jetson model detection
-JETSON_MODEL = "Unknown"
-if IS_JETSON:
-    try:
-        with open("/sys/devices/virtual/dmi/id/board_name", "r") as f:
-            JETSON_MODEL = f.read().strip()
-    except Exception:
-        pass
-
-# Python version
-PYTHON_VERSION = f"{sys.version_info.major}.{sys.version_info.minor}"
-
-# CPU monitoring function
-def get_cpu_usage():
-    """Get CPU usage using psutil or psutil fallback."""
-    if psutil is not None:
-        try:
-            return psutil.cpu_percent(interval=0.001)
-        except Exception:
-            pass
-
-    return 0
-
-# =====================================================
 # IMPORTS
-# =====================================================
-
 try:
     from realsense import RealSenseCamera
 except Exception as e:
+    print(f"[INIT] RealSense import: {e}")
     RealSenseCamera = None
 
 try:
-    from image_processing import ImageProcessor, start_process_log, stop_process_log, set_vehicle_speed
+    from image_processing import ImageProcessor
 except Exception as e:
+    print(f"[INIT] ImageProcessor import: {e}")
     ImageProcessor = None
 
 try:
     from read_speed import PerceptronSpeedReader
+    # quick smoke-test: instantiate to verify model loads
+    _test = PerceptronSpeedReader()
+    del _test
+    print("[INIT] PerceptronSpeedReader: OK")
 except Exception as e:
-    print(f"[MAIN] Import warning: PerceptronSpeedReader - {e}")
+    # Show the FULL traceback so you can see the real root cause
+    import traceback
+    print(f"[INIT] PerceptronSpeedReader FAILED:")
+    traceback.print_exc()
+    print(
+        "\n[INIT] FIX: run via ./run_visionpilot.sh instead of python3 main.py directly.\n"
+        "[INIT] This sets LD_PRELOAD before Python loads torch, which fixes the\n"
+        "[INIT] 'cannot allocate memory in static TLS block' error on Jetson/aarch64.\n"
+    )
     PerceptronSpeedReader = None
 
 try:
     from elm327_can_speed import ELM327SpeedReader
 except Exception as e:
-    print(f"[MAIN] Import warning: ELM327SpeedReader - {e}")
+    print(f"[INIT] ELM327SpeedReader import: {e}")
     ELM327SpeedReader = None
 
+# PLATFORM INFO
+IS_WINDOWS = platform.system() == "Windows"
+IS_LINUX = platform.system() == "Linux"
+IS_JETSON = IS_LINUX and os.path.exists("/etc/nv_tegra_release")
 
-# =====================================================
-# GLOBAL STATE
-# =====================================================
-
-class PipelineState:
+# STATE
+class State:
     def __init__(self):
         self.running = False
         self.camera = None
         self.processor = None
         self.speed_reader = None
         self.elm327_reader = None
-
         self.vehicle_speed = 0
         self.detected_sign = None
-        self.sign_detected_status = False  # Track if sign was detected (separate from speed)
+        self.sign_detected_status = False
         self.sign_center = None
-        self.last_vehicle_speed_print = 0
-        self.last_sign_print = None
-        self.last_detected_value = None
-
         self.frame_count = 0
         self.start_time = None
         self.current_frame = None
-
-        # CPU monitoring
         self.cpu_samples = []
         self.timestamps = []
+        self.last_display_time = 0
 
-state = PipelineState()
+state = State()
 
-# =====================================================
-# ELM327 CALLBACK
-# =====================================================
-
-def on_vehicle_speed_received(speed_kmh):
-    """Called when ELM327 reads a speed."""
-    state.vehicle_speed = speed_kmh
-    set_vehicle_speed(speed_kmh)
-
-
-# =====================================================
-# DISPLAY STATUS
-# =====================================================
-
-def display_status():
-    """Display vehicle speed, detected sign status, and read sign value on one line."""
-    # Show detection status (True if sign detected, regardless of speed classification)
-    detected_text = "Yes" if state.sign_detected_status else "No"
-
-    # Show read speed (only if both detected AND classified)
-    read_sign_text = f"{state.detected_sign}" if state.detected_sign is not None else "--"
-
-    status_line = f"Vehicle speed: {state.vehicle_speed} km/h | Detected sign: {detected_text} | Read sign: {read_sign_text} km/h"
-    # Use carriage return to overwrite same line - no padding to avoid duplicates
-    import sys
-    sys.stdout.write(f"\r{status_line}")
-    sys.stdout.flush()
-
-# =====================================================
-# INITIALIZE CAMERA
-# =====================================================
-
-def init_camera():
-    """Initialize RealSense camera."""
-    if RealSenseCamera is None:
-        print("[MAIN] RealSense not available, cannot initialize camera")
-        return False
-
-    try:
-        state.camera = RealSenseCamera(width=1920, height=1080, fps=30, auto_exposure=True)
-        state.camera.start()
-        print("[MAIN] [OK] Camera initialized (1920x1080 @ 30 FPS)")
-        return True
-    except Exception as e:
-        print(f"[MAIN] [NO] Failed to initialize camera: {e}")
-        state.camera = None
-        return False
-
-# =====================================================
-# INITIALIZE IMAGE PROCESSOR
-# =====================================================
-
-def init_processor():
-    """Initialize image processing pipeline."""
-    if ImageProcessor is None:
-        print("[MAIN] ImageProcessor not available")
-        return False
-
-    try:
-        state.processor = ImageProcessor()
-        print("[MAIN] [OK] Image processor initialized")
-        print("[MAIN]   - Red Nulling: ENABLED")
-        print("[MAIN]   - Canny Edge: ENABLED")
-        print("[MAIN]   - Ellipse Detection: ENABLED")
-        print("[MAIN]   - Speed Reader: ENABLED")
-        return True
-    except Exception as e:
-        print(f"[MAIN] [NO] Failed to initialize processor: {e}")
-        state.processor = None
-        return False
-
-# =====================================================
-# INITIALIZE SPEED READER
-# =====================================================
-
-def init_speed_reader():
-    """Initialize MLP speed reader."""
-    if PerceptronSpeedReader is None:
-        print("[MAIN] ⚠ MLP Speed Reader not available (optional)")
-        return False
-
-    try:
-        state.speed_reader = PerceptronSpeedReader()
-        print("[MAIN] [OK] MLP Speed Reader initialized")
-        return True
-    except Exception as e:
-        print(f"[MAIN] ⚠ MLP Speed Reader initialization failed: {e} (optional)")
-        state.speed_reader = None
-        return False
-
-# =====================================================
-# INITIALIZE ELM327
-# =====================================================
-
-def init_elm327():
-    """Initialize ELM327 CAN speed reader."""
-    if ELM327SpeedReader is None:
-        print("[MAIN] ⚠ ELM327SpeedReader not available (optional)")
-        return False
-
-    try:
-        # Auto-detect port - ELM327SpeedReader will find it
-        state.elm327_reader = ELM327SpeedReader(
-            port=None,  # Auto-detect
-            baudrate=9600,
-            callback=on_vehicle_speed_received
-        )
-        state.elm327_reader.start()
-        print(f"[MAIN] [OK] ELM327 reader started on {state.elm327_reader.port}")
-        return True
-    except Exception as e:
-        print(f"[MAIN] ⚠ Failed to initialize ELM327: {e} (optional)")
-        state.elm327_reader = None
-        return False
-
-# =====================================================
-# GUI WINDOW
-# =====================================================
-
-class VisionPilotWindow(QMainWindow):
-    """GUI window for visualization."""
-
-    frame_ready = pyqtSignal(np.ndarray)
-
-    def __init__(self):
-        super().__init__()
-        self.setWindowTitle("VisionPilot XR - Visual Control")
-        self.setGeometry(100, 100, 1000, 700)
-
-        # Central widget
-        central = QWidget()
-        self.setCentralWidget(central)
-        layout = QVBoxLayout(central)
-
-        # Video label
-        self.video_label = QLabel()
-        self.video_label.setMinimumSize(960, 540)
-        self.video_label.setStyleSheet("border: 1px solid black; background: black;")
-        layout.addWidget(self.video_label)
-
-        # Info label
-        info_layout = QHBoxLayout()
-        self.vehicle_speed_label = QLabel("Vehicle speed: -- km/h")
-        self.vehicle_speed_label.setFont(QFont("Arial", 12, QFont.Bold))
-        self.vehicle_speed_label.setStyleSheet("color: blue;")
-
-        self.detected_label = QLabel("Detected sign: No")
-        self.detected_label.setFont(QFont("Arial", 12, QFont.Bold))
-        self.detected_label.setStyleSheet("color: red;")
-
-        self.read_sign_label = QLabel("Read sign: -- km/h")
-        self.read_sign_label.setFont(QFont("Arial", 12, QFont.Bold))
-        self.read_sign_label.setStyleSheet("color: green;")
-
-        info_layout.addWidget(self.vehicle_speed_label)
-        info_layout.addWidget(self.detected_label)
-        info_layout.addWidget(self.read_sign_label)
-        layout.addLayout(info_layout)
-
-        # Setup timer for GUI updates
-        self.timer = QTimer()
-        self.timer.timeout.connect(self.update_display)
-        self.timer.start(30)  # ~30 FPS
-
-        self.last_frame = None
-
-    def update_display(self):
-        """Update GUI with latest data."""
-        # Update video from state
-        if hasattr(state, 'current_frame') and state.current_frame is not None:
-            self.display_frame(state.current_frame)
-
-        # Update labels
-        self.vehicle_speed_label.setText(f"Vehicle speed: {state.vehicle_speed} km/h")
-
-        # Use sign_detected_status (True if sign found) instead of checking detected_sign
-        detected_text = "Yes" if getattr(state, 'sign_detected_status', False) else "No"
-        self.detected_label.setText(f"Detected sign: {detected_text}")
-        if getattr(state, 'sign_detected_status', False):
-            self.detected_label.setStyleSheet("color: green;")
-        else:
-            self.detected_label.setStyleSheet("color: red;")
-
-        read_sign_text = f"{state.detected_sign}" if state.detected_sign is not None else "--"
-        self.read_sign_label.setText(f"Read sign: {read_sign_text} km/h")
-
-    def display_frame(self, frame):
-        """Display frame in label."""
+# HELPERS
+def get_cpu_usage():
+    if psutil:
         try:
-            # Resize frame to fit label
-            h, w = frame.shape[:2]
-            scale = min(960 / w, 540 / h)
-            new_w = int(w * scale)
-            new_h = int(h * scale)
+            return psutil.cpu_percent(interval=0.001)
+        except:
+            pass
+    return 0
 
-            resized = cv2.resize(frame, (new_w, new_h))
+# INIT COMPONENTS
+def init_all():
+    print("\n[MAIN] ============================================")
+    print("[MAIN] Initializing Components")
+    print("[MAIN] ============================================\n")
 
-            # Draw ellipse if detected
-            if state.sign_center is not None and len(state.sign_center) >= 2:
-                x, y = int(state.sign_center[0] * scale), int(state.sign_center[1] * scale)
-                if len(state.sign_center) >= 4:
-                    # state.sign_center = (cx, cy, half_w, half_h)
-                    a, b = int(state.sign_center[2] * scale), int(state.sign_center[3] * scale)
-                    cv2.ellipse(resized, (x, y), (a, b), 0, 0, 360, (0, 255, 0), 3)
-                else:
-                    cv2.circle(resized, (x, y), 10, (0, 255, 0), -1)
-
-            # Convert to RGB
-            rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
-            h, w, ch = rgb.shape
-            bytes_per_line = 3 * w
-            qt_image = QImage(rgb.data, w, h, bytes_per_line, QImage.Format_RGB888)
-
-            pixmap = QPixmap.fromImage(qt_image)
-            self.video_label.setPixmap(pixmap)
+    # Camera
+    print("[MAIN] [1/4] Camera...")
+    if RealSenseCamera:
+        try:
+            state.camera = RealSenseCamera(width=1920, height=1080, fps=30)
+            state.camera.start()
+            print("[MAIN] [OK] Camera initialized")
         except Exception as e:
-            print(f"[GUI] Display error: {e}")
+            print(f"[MAIN] [NO] Camera failed: {e}")
+            return False
+    else:
+        print("[MAIN] [NO] RealSense not available")
+        return False
 
-    def keyPressEvent(self, event):
-        """Handle key press events."""
-        if event.key() == 16777216:  # ESC key
-            self.close()
-        else:
-            super().keyPressEvent(event)
+    # Processor
+    print("[MAIN] [2/4] Image Processor...")
+    if ImageProcessor:
+        try:
+            state.processor = ImageProcessor()
+            print("[MAIN] [OK] Processor initialized")
+        except Exception as e:
+            print(f"[MAIN] [NO] Processor failed: {e}")
+            return False
+    else:
+        print("[MAIN] [NO] ImageProcessor not available")
+        return False
 
-    def closeEvent(self, event):
-        """Handle window close."""
-        state.running = False
-        self.timer.stop()
-        event.accept()
+    # MLP Reader
+    print("[MAIN] [3/4] MLP Speed Reader...")
+    if PerceptronSpeedReader:
+        try:
+            state.speed_reader = PerceptronSpeedReader()
+            state.processor.speed_reader = state.speed_reader
+            state.processor.read_sign_enabled = True
+            print("[MAIN] [OK] MLP Reader initialized")
+        except Exception as e:
+            print(f"[MAIN] [WARN] MLP Reader failed: {e}")
+    else:
+        print("[MAIN] [WARN] MLP Reader not available — speed reading disabled")
 
-        # Quit the QApplication
-        QApplication.instance().quit()
+    # ELM327
+    print("[MAIN] [4/4] ELM327 CAN Reader...")
+    if ELM327SpeedReader:
+        try:
+            state.elm327_reader = ELM327SpeedReader()
+            state.elm327_reader.start()
+            print("[MAIN] [OK] ELM327 reader started")
+        except Exception as e:
+            print(f"[MAIN] [WARN] ELM327 failed: {e}")
+    else:
+        print("[MAIN] [WARN] ELM327 not available (pyserial missing?)")
 
-# =====================================================
-# MAIN PROCESSING LOOP
-# =====================================================
+    print("\n[MAIN] [OK] All components ready!")
+    print("[MAIN] Press ESC in window or Ctrl+C to stop\n")
+    return True
 
+# PROCESS FRAME
 def process_frame():
-    """Process a single frame through the pipeline."""
-    if state.camera is None or state.processor is None:
+    if not state.camera or not state.processor:
         return False
 
     try:
@@ -385,301 +173,168 @@ def process_frame():
         if not ok or frame is None:
             return False
 
-        # Store current frame for GUI
         state.current_frame = frame.copy()
 
-        # Enable all processing features
+        # Process
         state.processor.enable_red = True
         state.processor.enable_canny = True
         state.processor.enable_ellipse = True
         state.processor.read_sign_enabled = True
 
-        # Reset detection flag BEFORE processing this frame
-        state.processor.sign_detected_this_frame = False
+        # reset frame-local output before processing
+        state.processor.last_sign_center = None
 
-        # Run processor
-        result_img = state.processor.process(frame)
+        result = state.processor.process(frame)
 
-        if result_img is None:
-            return False
+        # Get results directly from processor output
+        detected_speed = getattr(state.processor, 'last_speed', None)
 
-        # Get detection status (sign found or not)
-        sign_detected_this_frame = getattr(state.processor, 'sign_detected_this_frame', False)
-
-        # Get speed if available (requires MLP)
-        if sign_detected_this_frame and hasattr(state.processor, 'last_speed') and state.processor.last_speed is not None:
-            detected_sign = state.processor.last_speed
-            sign_detected = True
-        elif sign_detected_this_frame:
-            # Sign detected but speed classification not available (e.g., no PyTorch)
-            detected_sign = None
-            sign_detected = True
+        if detected_speed is not None:
+            state.sign_detected_status = True
+            state.detected_sign = detected_speed
         else:
-            detected_sign = None
-            sign_detected = False
+            state.sign_detected_status = False
+            state.detected_sign = None
 
-        state.detected_sign = detected_sign
-        state.sign_detected_status = sign_detected  # Track detection separately from speed
+        state.sign_center = getattr(state.processor, 'last_sign_center', None)
 
-
-        # Also store ellipse center for visualization
-        if hasattr(state.processor, 'last_sign_center'):
-            state.sign_center = state.processor.last_sign_center
-        else:
-            state.sign_center = None
-
-        # Check if any value changed
-        speed_changed = state.vehicle_speed != state.last_vehicle_speed_print
-        detected_changed = detected_sign != state.last_sign_print
-        read_sign_changed = detected_sign != state.last_detected_value
-
-        # Display if anything changed
-        if speed_changed or detected_changed or read_sign_changed:
-            display_status()
-            state.last_vehicle_speed_print = state.vehicle_speed
-            state.last_sign_print = detected_sign
-            state.last_detected_value = detected_sign
-
-        # Record CPU usage every frame (not just every 0.5s)
-        cpu_percent = get_cpu_usage()
-        if cpu_percent >= 0:
-            state.cpu_samples.append(cpu_percent)
+        # CPU tracking
+        cpu = get_cpu_usage()
+        if cpu >= 0:
+            state.cpu_samples.append(cpu)
             state.timestamps.append(time.time() - state.start_time)
 
         state.frame_count += 1
         return True
     except Exception as e:
-        print(f"[ERROR] Frame processing failed: {e}")
+        print(f"[ERROR] Frame processing: {e}")
         return False
 
-# =====================================================
-# MAIN LOOP
-# =====================================================
+# DISPLAY
+def display_status():
+    now = time.time()
+    if now - state.last_display_time < 0.1:
+        return
 
+    state.last_display_time = now
+
+    detected_text = "Yes" if state.sign_detected_status else "No"
+    read_sign_text = f"{state.detected_sign}" if state.detected_sign is not None else "--"
+
+    status = f"Vehicle speed: {state.vehicle_speed} km/h | Detected sign: {detected_text} | Read sign: {read_sign_text} km/h"
+    sys.stdout.write(f"\r{status:<100}")
+    sys.stdout.flush()
+
+def display_frame():
+    if state.current_frame is None:
+        return
+
+    try:
+        frame = state.current_frame.copy()
+
+        detected_text = "Yes" if state.sign_detected_status else "No"
+        read_sign_text = f"{state.detected_sign}" if state.detected_sign is not None else "--"
+
+        cv2.putText(frame, f"Speed: {state.vehicle_speed} km/h", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (255,0,0), 2)
+        cv2.putText(frame, f"Detected: {detected_text}", (20, 90), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,255,0) if state.sign_detected_status else (0,0,255), 2)
+        cv2.putText(frame, f"Read: {read_sign_text} km/h", (20, 140), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,255,0), 2)
+
+        if state.sign_center and len(state.sign_center) >= 2:
+            x, y = int(state.sign_center[0]), int(state.sign_center[1])
+            if len(state.sign_center) >= 4:
+                a, b = int(state.sign_center[2]), int(state.sign_center[3])
+                cv2.ellipse(frame, (x, y), (a, b), 0, 0, 360, (0,255,0), 3)
+            else:
+                cv2.circle(frame, (x, y), 10, (0,255,0), -1)
+
+        cv2.imshow("VisionPilot XR", frame)
+        key = cv2.waitKey(1) & 0xFF
+        if key == 27:
+            state.running = False
+    except Exception as e:
+        pass
+
+# MAIN LOOP
 def run():
-    """Main processing loop."""
-    print("[MAIN] Starting main loop...")
+    print("[MAIN] Starting main loop...\n")
 
     state.running = True
     state.start_time = time.time()
 
-    frame_times = []
-    last_status_display = 0  # Track when we last displayed status
-
-    # Display initial status
-    print("\n", end="", flush=True)  # New line before status
-    display_status()
-
     try:
         while state.running:
-            frame_start = time.time()
-
-            # Process one frame
             ok = process_frame()
-
-            frame_time = (time.time() - frame_start) * 1000  # ms
-            frame_times.append(frame_time)
-
-            # Keep only last 100 frame times
-            if len(frame_times) > 100:
-                frame_times.pop(0)
-
-            # Display status every 0.5 seconds even if nothing changed
-            current_time = time.time()
-            if current_time - last_status_display > 0.5:
-                display_status()
-                last_status_display = current_time
-
-            # Sleep a bit to prevent 100% CPU
+            display_status()
+            display_frame()
             time.sleep(0.001)
-
     except KeyboardInterrupt:
-        pass
-    except Exception as e:
         pass
     finally:
         state.running = False
+        cv2.destroyAllWindows()
 
-# =====================================================
 # SHUTDOWN
-# =====================================================
-
 def shutdown():
-    """Clean shutdown of all components."""
-    state.running = False
-
-    # Stop ELM327
-    if state.elm327_reader is not None:
-        try:
-            state.elm327_reader.running = False
-        except Exception:
-            pass
-
-    # Stop camera
-    if state.camera is not None:
-        try:
-            state.camera.stop()
-        except Exception:
-            pass
-
-    # Clear the terminal line before showing final stats
     print("\n\n")
 
-    # Display CPU graph
-    print("[MAIN] ============================================")
-    print("[MAIN] Generating CPU usage graph...")
-    print("[MAIN] ============================================\n")
+    if state.camera:
+        try:
+            state.camera.stop()
+        except:
+            pass
 
-    if plt is not None and len(state.cpu_samples) > 0:
+    if state.elm327_reader:
+        try:
+            state.elm327_reader.running = False
+        except:
+            pass
+
+    if plt and len(state.cpu_samples) > 0:
         try:
             plt.figure(figsize=(12, 6))
-            plt.plot(state.timestamps, state.cpu_samples, 'b-', linewidth=2, label='CPU Usage')
-            plt.xlabel('Time (seconds)', fontsize=12)
-            plt.ylabel('CPU Usage (%)', fontsize=12)
-            plt.title('CPU Usage During VisionPilot XR Execution', fontsize=14, fontweight='bold')
+            plt.plot(state.timestamps, state.cpu_samples, 'b-', linewidth=2)
+            plt.xlabel('Time (s)')
+            plt.ylabel('CPU Usage (%)')
+            plt.title('CPU Usage During VisionPilot XR')
             plt.grid(True, alpha=0.3)
-            plt.legend(fontsize=11)
             plt.ylim(0, 100)
 
-            # Add statistics
-            avg_cpu = np.mean(state.cpu_samples)
-            max_cpu = np.max(state.cpu_samples)
-            min_cpu = np.min(state.cpu_samples)
+            avg = np.mean(state.cpu_samples)
+            plt.text(0.5, 0.95, f'Avg: {avg:.1f}%', transform=plt.gca().transAxes, ha='center')
 
-            stats_text = f'Avg: {avg_cpu:.1f}% | Max: {max_cpu:.1f}% | Min: {min_cpu:.1f}%'
-            plt.text(0.5, 0.95, stats_text, transform=plt.gca().transAxes,
-                    ha='center', va='top', fontsize=11, bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
-
-            plt.tight_layout()
-
-            # Save graph
-            log_dir = os.path.join(os.path.dirname(__file__), "log_files")
-            os.makedirs(log_dir, exist_ok=True)
-            graph_file = os.path.join(log_dir, f"cpu_graph_{time.strftime('%Y-%m-%d_%H-%M-%S')}.png")
-            plt.savefig(graph_file, dpi=100)
-            print(f"[MAIN] Graph saved to: {graph_file}\n")
-
-            # Try to show graph
-            try:
-                plt.show()
-            except Exception:
-                pass
-
-            print(f"[MAIN] CPU Statistics:")
-            print(f"[MAIN]   - Average CPU: {avg_cpu:.2f}%")
-            print(f"[MAIN]   - Max CPU: {max_cpu:.2f}%")
-            print(f"[MAIN]   - Min CPU: {min_cpu:.2f}%")
-            print(f"[MAIN]   - Total samples: {len(state.cpu_samples)}")
-            if len(state.timestamps) > 0:
-                print(f"[MAIN]   - Runtime: {state.timestamps[-1]:.2f}s")
-            print("[MAIN] ============================================\n")
+            log_dir = Path("log_files")
+            log_dir.mkdir(exist_ok=True)
+            graph_file = log_dir / f"cpu_graph_{time.strftime('%Y-%m-%d_%H-%M-%S')}.png"
+            plt.savefig(str(graph_file), dpi=100)
+            print(f"[MAIN] Graph saved: {graph_file}\n")
+            plt.show()
         except Exception as e:
-            print(f"[MAIN] Error displaying CPU graph: {e}\n")
-    elif plt is None:
-        print("[MAIN] ⚠ matplotlib not installed, cannot display graph\n")
-    else:
-        print("[MAIN] ⚠ No CPU data collected\n")
-
-    # Display final status
-    print("\n[MAIN] ============================================")
-    print(f"[MAIN] VisionPilot XR Completed")
-    print(f"[MAIN] Total frames processed: {state.frame_count}")
-    print(f"[MAIN] Total time: {time.time() - state.start_time:.2f}s")
-    print("[MAIN] ============================================\n")
-
-
-
-# =====================================================
-# MAIN ENTRY
-# =====================================================
-
-def main():
-    """Main entry point."""
+            print(f"[MAIN] Graph error: {e}\n")
 
     print("[MAIN] ============================================")
-    print("[MAIN] VisionPilot XR - Headless Mode")
+    print(f"[MAIN] Frames: {state.frame_count}")
+    print(f"[MAIN] Time: {time.time() - state.start_time:.2f}s")
+    print("[MAIN] ============================================\n")
+
+# MAIN
+def main():
+    print("\n[MAIN] ============================================")
+    print("[MAIN] VisionPilot XR - OpenCV GUI Mode")
     print(f"[MAIN] Platform: {platform.system()}")
     if IS_JETSON:
-        print(f"[MAIN] Device: NVIDIA Jetson ({JETSON_MODEL})")
-    print(f"[MAIN] Python: {PYTHON_VERSION}")
-    print("[MAIN] ============================================\n")
-
+        print("[MAIN] Device: NVIDIA Jetson")
     print("[MAIN] ============================================")
-    print("[MAIN] Initializing all components...")
-    print("[MAIN] ============================================\n")
 
-    success = True
-
-    print("[MAIN] [1/4] Initializing Camera...")
-    if not init_camera():
-        success = False
-
-    print("[MAIN] [2/4] Initializing Image Processor...")
-    if not init_processor():
-        success = False
-
-    print("[MAIN] [3/4] Initializing Speed Reader (MLP)...")
-    if not init_speed_reader():
-        print("[MAIN] ⚠ MLP Speed Reader optional, continuing without speed classification")
-
-    print("[MAIN] [4/4] Initializing ELM327 CAN Reader...")
-    if not init_elm327():
-        print("[MAIN] ⚠ ELM327 optional, continuing without vehicle speed")
-
-    # Connect speed_reader to processor
-    if state.speed_reader is not None and state.processor is not None:
-        try:
-            state.processor.speed_reader = state.speed_reader
-            state.processor.read_sign_enabled = True
-            print("[MAIN] [OK] Speed reader connected to processor")
-        except Exception as e:
-            print(f"[MAIN] [NO] Failed to connect speed reader: {e}")
-
-    if not success:
-        print("\n[MAIN] ✗ Critical component failed to initialize")
+    if not init_all():
+        print("[MAIN] Initialization failed")
         sys.exit(1)
 
-    print("\n[MAIN] ============================================")
-    print("[MAIN] [OK] All components ready!")
-    print("[MAIN] ============================================")
-    print("[MAIN] Press Ctrl+C or ESC to stop\n")
-
-    # Try to create GUI if display is available
-    gui_available = False
-    processing_thread = None
     try:
-        app = QApplication(sys.argv)
-        window = VisionPilotWindow()
-        window.show()
-        gui_available = True
-
-        # Start processing thread
-        processing_thread = threading.Thread(target=run, daemon=False)
-        processing_thread.start()
-
-        # Run Qt event loop
-        app.exec_()
-
-        # After GUI closes, wait for processing thread to finish
-        state.running = False
-        if processing_thread is not None:
-            processing_thread.join(timeout=5)
-
-        # Call shutdown to display graph
-        shutdown()
-
-    except Exception as e:
-        if gui_available:
-            state.running = False
-            if processing_thread is not None:
-                processing_thread.join(timeout=5)
-            shutdown()
-            raise
-        print(f"[MAIN] GUI not available, running headless mode only\n")
-        # Run main loop directly
         run()
+    except Exception as e:
+        print(f"[ERROR] {e}")
+    finally:
         shutdown()
 
 if __name__ == "__main__":
     main()
-
