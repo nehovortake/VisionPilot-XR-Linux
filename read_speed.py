@@ -110,7 +110,7 @@ class PerceptronSpeedReader:
         if not path.exists():
             raise FileNotFoundError(f"MLP model not found: {path}")
 
-        checkpoint = torch.load(str(path), map_location="cpu", weights_only=False)
+        checkpoint = torch.load(str(path), map_location="cpu")
 
         class_labels = checkpoint.get("class_labels", None)
         if class_labels is None:
@@ -141,7 +141,7 @@ class PerceptronSpeedReader:
         self.model.load_state_dict(state, strict=True)
         self.model.eval()
 
-        print(f"[MLP] Loaded | classes={self.labels} | img={self.img_size} | device=cpu")
+        print(f"[MLP] Loaded | classes={self.labels} | img={self.img_size}")
 
     @staticmethod
     def _margin_top1_top2(logits_1d: np.ndarray) -> float:
@@ -187,6 +187,7 @@ class PerceptronSpeedReader:
                     out = self.model(x_tensor)
 
                 logits = out.squeeze(0).cpu().numpy()
+
                 exp_logits = np.exp(logits - logits.max())
                 probs = exp_logits / exp_logits.sum()
 
