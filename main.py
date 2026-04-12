@@ -160,7 +160,10 @@ def display_status():
     read_sign_text = f"{state.detected_sign}" if state.detected_sign is not None else "--"
 
     status_line = f"Vehicle speed: {state.vehicle_speed} km/h | Detected sign: {detected_text} | Read sign: {read_sign_text} km/h"
-    print(f"\r{status_line:<120}", end="", flush=True)
+    # Use carriage return to overwrite same line - no padding to avoid duplicates
+    import sys
+    sys.stdout.write(f"\r{status_line}")
+    sys.stdout.flush()
 
 # =====================================================
 # INITIALIZE CAMERA
