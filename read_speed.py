@@ -13,8 +13,15 @@ from collections import deque
 import numpy as np
 import cv2
 
-import torch
-import torch.nn as nn
+try:
+    import torch
+    import torch.nn as nn
+    TORCH_AVAILABLE = True
+except ImportError:
+    print("[read_speed] Warning: PyTorch not installed, speed reader will be disabled")
+    torch = None
+    nn = None
+    TORCH_AVAILABLE = False
 
 
 # ======================================================
@@ -117,216 +124,231 @@ def preprocess_inner_mask(
 # MLP MODEL DEFINITION (must match training)
 # ======================================================
 
-class SpeedMLP(nn.Module):
-    def __init__(self, num_classes: int):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(4096, 128),
-            nn.ReLU(),
-            nn.Linear(128, num_classes),
-        )
+if TORCH_AVAILABLE:
+    class SpeedMLP(nn.Module):
+        def __init__(self, num_classes: int):
+            super().__init__()
+            self.net = nn.Sequential(
+                nn.Linear(4096, 128),
+                nn.ReLU(),
+                nn.Linear(128, num_classes),
+            )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x)
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.net(x)
+else:
+    SpeedMLP = None
 
 
 # ======================================================
 # READER CLASS (QT SAFE)
 # ======================================================
 
-class PerceptronSpeedReader:
-    """
-    Historical name kept for compatibility with the rest of your project.
-    Now it uses PyTorch MLP internally.
-    """
-
-    def __init__(self, model_path: Path = MODEL_PATH):
-        # model + meta
-        self.model: SpeedMLP | None = None
-        self.labels: list[int] | None = None
-        self.img_size: int = 64
-
-        # defaults (used when variant says None)
-        # NOTE: these are only defaults. For 3-digit we override via variants.
-        self.inner_scale: float = 0.75
-        self.focus_scale: float = 0.90
-
-        # ==========================
-        # RUNTIME STABILIZATION
-        # ==========================
-        self.pred_hist = deque(maxlen=7)  # last N confident predictions
-        self.last_stable: int | None = None
-        self.min_margin = 0.35            # confidence threshold (top1-top2)
-        self.min_votes = 4                # votes required to accept winner
-
-        # ==========================
-        # SOFTMAX PRAHOVANIE (školiteľ)
-        # ==========================
-        # Ak najvyššia softmax pravdepodobnosť na výstupe MLP neprekročí
-        # tento prah, predikcia sa zahodí (crop nie je platná značka).
-        # Typické hodnoty: 0.70 – 0.90  (vyšší = prísnejší filter)
-        self.min_softmax_prob = 0.9
-
-        self._load_model(model_path)
-
-    def _load_model(self, path: Path):
-        if not path.exists():
-            raise FileNotFoundError(f"MLP model not found: {path}")
-
-        checkpoint = torch.load(str(path), map_location="cpu")
-
-        # required keys from training save
-        class_labels = checkpoint.get("class_labels", None)
-        if class_labels is None:
-            raise KeyError("Missing 'class_labels' in .pt checkpoint")
-
-        self.labels = [int(x) for x in class_labels]
-        self.img_size = int(checkpoint.get("img_size", 64))
-
-        self.model = SpeedMLP(num_classes=len(self.labels))
-        state = checkpoint["state_dict"]
-
-        # ------------------------------------------------------
-        # BACKWARD COMPAT: starý model ukladal fc1/fc2,
-        # nový model má nn.Sequential -> net.0 / net.2
-        # ------------------------------------------------------
-        if ("fc1.weight" in state) and ("net.0.weight" not in state):
-            state = {
-                "net.0.weight": state["fc1.weight"],
-                "net.0.bias": state["fc1.bias"],
-                "net.2.weight": state["fc2.weight"],
-                "net.2.bias": state["fc2.bias"],
-            }
-
-        # (voliteľné) aj opačný smer, keby si niekedy načítal nový checkpoint do starého runtime
-        if ("net.0.weight" in state) and ("fc1.weight" not in state) and hasattr(self.model, "fc1"):
-            state = {
-                "fc1.weight": state["net.0.weight"],
-                "fc1.bias": state["net.0.bias"],
-                "fc2.weight": state["net.2.weight"],
-                "fc2.bias": state["net.2.bias"],
-            }
-
-        self.model.load_state_dict(state, strict=True)
-
-        self.model.eval()
-
-        print(f"[MLP] Loaded | classes={self.labels} | img={self.img_size}")
-
-    # --------------------------------------------------
-    # helpers
-    # --------------------------------------------------
-    @staticmethod
-    def _margin_top1_top2(logits_1d: np.ndarray) -> float:
-        """top1 - top2 margin (bigger = more confident)"""
-        if logits_1d is None or logits_1d.size == 0:
-            return -1e9
-        if logits_1d.size == 1:
-            return float(logits_1d[0])
-        top2 = np.partition(logits_1d, -2)[-2:]
-        # top2 contains two largest (unordered)
-        return float(top2.max() - top2.min())
-
-    # ==================================================
-    # MAIN API – CALL THIS FROM IMAGE PROCESSOR
-    # ==================================================
-    def predict_from_crop(self, crop_bgr: np.ndarray):
-        # type: (np.ndarray) -> Optional[int]
+if TORCH_AVAILABLE:
+    class PerceptronSpeedReader:
         """
-        crop_bgr : np.ndarray (BGR) – ellipse crop
-        return   : Optional[int] (speed km/h)
+        Historical name kept for compatibility with the rest of your project.
+        Now it uses PyTorch MLP internally.
         """
-        try:
-            if crop_bgr is None or crop_bgr.size == 0:
-                return self.last_stable
 
-            if self.model is None or self.labels is None:
-                return self.last_stable
+        def __init__(self, model_path: Path = MODEL_PATH):
+            # model + meta
+            self.model: SpeedMLP | None = None
+            self.labels: list[int] | None = None
+            self.img_size: int = 64
 
-            best_label: int | None = None
-            best_margin: float = -1e9
-            best_maxlogit: float = -1e9
-            best_prob: float = 0.0       # najvyššia softmax pravdepodobnosť
-
-            # try multiple preprocessing variants and pick the most confident
-            for _name, cfg in RUNTIME_PREPROCESS_VARIANTS:
-                inner_scale = self.inner_scale if cfg.get("inner_scale") is None else float(cfg["inner_scale"])
-                focus_scale = self.focus_scale if cfg.get("focus_scale") is None else float(cfg["focus_scale"])
-                crop_mode = cfg.get("crop_mode", "crop")
-
-                patch = preprocess_inner_mask(
-                    crop_bgr,
-                    out_size=self.img_size,
-                    inner_scale=inner_scale,
-                    focus_scale=focus_scale,
-                    crop_mode=crop_mode,
-                )
-                if patch is None:
-                    continue
-
-                x = (patch.astype(np.float32) / 255.0).reshape(1, -1)  # (1,4096)
-                x_tensor = torch.from_numpy(x)
-
-                with torch.no_grad():
-                    out = self.model(x_tensor)  # (1,num_classes)
-
-                logits = out.squeeze(0).cpu().numpy()
-
-                # --- SOFTMAX prahovanie (školiteľ) ---
-                # Aplikujeme softmax na výstupnú vrstvu MLP
-                # a prahujeme najvyššiu pravdepodobnosť
-                exp_logits = np.exp(logits - logits.max())  # numericky stabilný softmax
-                probs = exp_logits / exp_logits.sum()
-
-                idx = int(np.argmax(probs))
-                pred_label = int(self.labels[idx])
-                top_prob = float(probs[idx])
-
-                margin = self._margin_top1_top2(logits)
-                maxlogit = float(logits[idx])
-
-                # pick: higher softmax prob, tie-break by margin
-                if (top_prob > best_prob) or (top_prob == best_prob and margin > best_margin):
-                    best_margin = margin
-                    best_maxlogit = maxlogit
-                    best_label = pred_label
-                    best_prob = top_prob
-
-            # nothing worked
-            if best_label is None:
-                return self.last_stable
+            # defaults (used when variant says None)
+            # NOTE: these are only defaults. For 3-digit we override via variants.
+            self.inner_scale: float = 0.75
+            self.focus_scale: float = 0.90
 
             # ==========================
-            # 1) SOFTMAX PRAH (školiteľ)
+            # RUNTIME STABILIZATION
             # ==========================
-            # Ak najvyššia softmax pravdepodobnosť neprekročí prah,
-            # crop nie je platná značka (falošná elipsa) → zahodiť.
-            if best_prob < self.min_softmax_prob:
+            self.pred_hist = deque(maxlen=7)  # last N confident predictions
+            self.last_stable: int | None = None
+            self.min_margin = 0.35            # confidence threshold (top1-top2)
+            self.min_votes = 4                # votes required to accept winner
+
+            # ==========================
+            # SOFTMAX PRAHOVANIE (školiteľ)
+            # ==========================
+            # Ak najvyššia softmax pravdepodobnosť na výstupe MLP neprekročí
+            # tento prah, predikcia sa zahodí (crop nie je platná značka).
+            # Typické hodnoty: 0.70 – 0.90  (vyšší = prísnejší filter)
+            self.min_softmax_prob = 0.9
+
+            self._load_model(model_path)
+
+        def _load_model(self, path: Path):
+            if not path.exists():
+                raise FileNotFoundError(f"MLP model not found: {path}")
+
+            checkpoint = torch.load(str(path), map_location="cpu")
+
+            # required keys from training save
+            class_labels = checkpoint.get("class_labels", None)
+            if class_labels is None:
+                raise KeyError("Missing 'class_labels' in .pt checkpoint")
+
+            self.labels = [int(x) for x in class_labels]
+            self.img_size = int(checkpoint.get("img_size", 64))
+
+            self.model = SpeedMLP(num_classes=len(self.labels))
+            state = checkpoint["state_dict"]
+
+            # ------------------------------------------------------
+            # BACKWARD COMPAT: starý model ukladal fc1/fc2,
+            # nový model má nn.Sequential -> net.0 / net.2
+            # ------------------------------------------------------
+            if ("fc1.weight" in state) and ("net.0.weight" not in state):
+                state = {
+                    "net.0.weight": state["fc1.weight"],
+                    "net.0.bias": state["fc1.bias"],
+                    "net.2.weight": state["fc2.weight"],
+                    "net.2.bias": state["fc2.bias"],
+                }
+
+            # (voliteľné) aj opačný smer, keby si niekedy načítal nový checkpoint do starého runtime
+            if ("net.0.weight" in state) and ("fc1.weight" not in state) and hasattr(self.model, "fc1"):
+                state = {
+                    "fc1.weight": state["net.0.weight"],
+                    "fc1.bias": state["net.0.bias"],
+                    "fc2.weight": state["net.2.weight"],
+                    "fc2.bias": state["net.2.bias"],
+                }
+
+            self.model.load_state_dict(state, strict=True)
+
+            self.model.eval()
+
+            print(f"[MLP] Loaded | classes={self.labels} | img={self.img_size}")
+
+        # --------------------------------------------------
+        # helpers
+        # --------------------------------------------------
+        @staticmethod
+        def _margin_top1_top2(logits_1d: np.ndarray) -> float:
+            """top1 - top2 margin (bigger = more confident)"""
+            if logits_1d is None or logits_1d.size == 0:
+                return -1e9
+            if logits_1d.size == 1:
+                return float(logits_1d[0])
+            top2 = np.partition(logits_1d, -2)[-2:]
+            # top2 contains two largest (unordered)
+            return float(top2.max() - top2.min())
+
+        # ==================================================
+        # MAIN API – CALL THIS FROM IMAGE PROCESSOR
+        # ==================================================
+        def predict_from_crop(self, crop_bgr: np.ndarray):
+            # type: (np.ndarray) -> Optional[int]
+            """
+            crop_bgr : np.ndarray (BGR) – ellipse crop
+            return   : Optional[int] (speed km/h)
+            """
+            try:
+                if crop_bgr is None or crop_bgr.size == 0:
+                    return self.last_stable
+
+                if self.model is None or self.labels is None:
+                    return self.last_stable
+
+                best_label: int | None = None
+                best_margin: float = -1e9
+                best_maxlogit: float = -1e9
+                best_prob: float = 0.0       # najvyššia softmax pravdepodobnosť
+
+                # try multiple preprocessing variants and pick the most confident
+                for _name, cfg in RUNTIME_PREPROCESS_VARIANTS:
+                    inner_scale = self.inner_scale if cfg.get("inner_scale") is None else float(cfg["inner_scale"])
+                    focus_scale = self.focus_scale if cfg.get("focus_scale") is None else float(cfg["focus_scale"])
+                    crop_mode = cfg.get("crop_mode", "crop")
+
+                    patch = preprocess_inner_mask(
+                        crop_bgr,
+                        out_size=self.img_size,
+                        inner_scale=inner_scale,
+                        focus_scale=focus_scale,
+                        crop_mode=crop_mode,
+                    )
+                    if patch is None:
+                        continue
+
+                    x = (patch.astype(np.float32) / 255.0).reshape(1, -1)  # (1,4096)
+                    x_tensor = torch.from_numpy(x)
+
+                    with torch.no_grad():
+                        out = self.model(x_tensor)  # (1,num_classes)
+
+                    logits = out.squeeze(0).cpu().numpy()
+
+                    # --- SOFTMAX prahovanie (školiteľ) ---
+                    # Aplikujeme softmax na výstupnú vrstvu MLP
+                    # a prahujeme najvyššiu pravdepodobnosť
+                    exp_logits = np.exp(logits - logits.max())  # numericky stabilný softmax
+                    probs = exp_logits / exp_logits.sum()
+
+                    idx = int(np.argmax(probs))
+                    pred_label = int(self.labels[idx])
+                    top_prob = float(probs[idx])
+
+                    margin = self._margin_top1_top2(logits)
+                    maxlogit = float(logits[idx])
+
+                    # pick: higher softmax prob, tie-break by margin
+                    if (top_prob > best_prob) or (top_prob == best_prob and margin > best_margin):
+                        best_margin = margin
+                        best_maxlogit = maxlogit
+                        best_label = pred_label
+                        best_prob = top_prob
+
+                # nothing worked
+                if best_label is None:
+                    return self.last_stable
+
+                # ==========================
+                # 1) SOFTMAX PRAH (školiteľ)
+                # ==========================
+                # Ak najvyššia softmax pravdepodobnosť neprekročí prah,
+                # crop nie je platná značka (falošná elipsa) → zahodiť.
+                if best_prob < self.min_softmax_prob:
+                    return self.last_stable
+
+                # ==========================
+                # 2) CONFIDENCE GATE (margin)
+                # ==========================
+                if best_margin < self.min_margin:
+                    return self.last_stable
+
+                # ==========================
+                # 3) TEMPORAL STABILIZATION (majority vote)
+                # ==========================
+                self.pred_hist.append(best_label)
+
+                counts: dict[int, int] = {}
+                for v in self.pred_hist:
+                    counts[v] = counts.get(v, 0) + 1
+
+                winner, votes = max(counts.items(), key=lambda kv: kv[1])
+
+                if votes < self.min_votes:
+                    return self.last_stable
+
+                self.last_stable = winner
                 return self.last_stable
 
-            # ==========================
-            # 2) CONFIDENCE GATE (margin)
-            # ==========================
-            if best_margin < self.min_margin:
+            except Exception as e:
+                print("[MLP] Prediction error:", e)
                 return self.last_stable
 
-            # ==========================
-            # 3) TEMPORAL STABILIZATION (majority vote)
-            # ==========================
-            self.pred_hist.append(best_label)
+else:
+    # PyTorch not available - provide dummy class
+    class PerceptronSpeedReader:
+        def __init__(self, *args, **kwargs):
+            print("[MLP] Error: PyTorch not installed, PerceptronSpeedReader unavailable")
+            self.model = None
 
-            counts: dict[int, int] = {}
-            for v in self.pred_hist:
-                counts[v] = counts.get(v, 0) + 1
+        def predict_from_crop(self, *args, **kwargs):
+            return None
 
-            winner, votes = max(counts.items(), key=lambda kv: kv[1])
-
-            if votes < self.min_votes:
-                return self.last_stable
-
-            self.last_stable = winner
-            return self.last_stable
-
-        except Exception as e:
-            print("[MLP] Prediction error:", e)
-            return self.last_stable

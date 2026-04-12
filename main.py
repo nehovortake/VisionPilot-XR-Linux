@@ -230,21 +230,14 @@ def init_elm327():
         return False
 
     try:
-        # Detect COM port based on platform
-        if IS_WINDOWS:
-            port = "COM12"
-        elif IS_LINUX:
-            port = "/dev/ttyUSB0"  # Default on Jetson/Linux
-        else:
-            port = "COM12"
-
+        # Auto-detect port - ELM327SpeedReader will find it
         state.elm327_reader = ELM327SpeedReader(
-            port=port,
+            port=None,  # Auto-detect
             baudrate=9600,
             callback=on_vehicle_speed_received
         )
         state.elm327_reader.start()
-        print(f"[MAIN] [OK] ELM327 reader started on {port}")
+        print(f"[MAIN] [OK] ELM327 reader started on {state.elm327_reader.port}")
         return True
     except Exception as e:
         print(f"[MAIN] [NO] Failed to initialize ELM327: {e}")
@@ -587,7 +580,7 @@ def main():
 
     print("[MAIN] [3/4] Initializing Speed Reader (MLP)...")
     if not init_speed_reader():
-        success = False
+        print("[MAIN] ⚠ MLP Speed Reader optional, continuing without speed classification")
 
     print("[MAIN] [4/4] Initializing ELM327 CAN Reader...")
     if not init_elm327():

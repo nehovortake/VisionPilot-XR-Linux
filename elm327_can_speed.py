@@ -1,12 +1,53 @@
 import re
 import serial
+import serial.tools.list_ports
 import threading
 import time
+import glob
+import os
+import platform
+
+
+def find_elm327_port():
+    """Auto-detect ELM327 serial port on Windows/Linux/Jetson."""
+    ports_to_try = []
+
+    # Try pyserial's port listing first
+    try:
+        for port_info in serial.tools.list_ports.comports():
+            ports_to_try.append(port_info.device)
+    except Exception:
+        pass
+
+    # On Linux/Jetson, also try common paths
+    if platform.system() == "Linux":
+        ports_to_try.extend([
+            "/dev/ttyUSB0",
+            "/dev/ttyUSB1",
+            "/dev/ttyACM0",
+            "/dev/ttyACM1",
+            "/dev/ttyS0",
+        ])
+        # Also scan /dev/ for any serial devices
+        ports_to_try.extend(glob.glob("/dev/ttyUSB*"))
+        ports_to_try.extend(glob.glob("/dev/ttyACM*"))
+
+    # Remove duplicates and non-existent ports
+    ports_to_try = list(set(ports_to_try))
+    ports_to_try = [p for p in ports_to_try if p and (platform.system() == "Windows" or os.path.exists(p))]
+
+    return ports_to_try
 
 
 class ELM327SpeedReader(threading.Thread):
-    def __init__(self, port="COM12", baudrate=9600, callback=None):
+    def __init__(self, port=None, baudrate=9600, callback=None):
         super().__init__(daemon=True)
+
+        # Auto-detect port if not provided
+        if port is None:
+            available_ports = find_elm327_port()
+            port = available_ports[0] if available_ports else "COM12"
+            print(f"[ELM327] Auto-detected port: {port}")
 
         self.port = port
         self.baudrate = baudrate
