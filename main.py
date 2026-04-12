@@ -67,16 +67,36 @@ def get_cpu_usage():
                         cpu_str = match.group(1)
                         cpus = [float(x.strip().rstrip('%')) for x in cpu_str.split(',')]
                         return np.mean(cpus)
-            return 0
+        except FileNotFoundError:
+            # tegrastats not installed
+            pass
         except Exception:
+            # tegrastats failed
             pass
 
-    # Fallback to psutil on other platforms or if tegrastats fails
+    # Fallback to psutil on all platforms or if tegrastats fails
     if psutil is not None:
         try:
             return psutil.cpu_percent(interval=0.01)
         except Exception:
-            return 0
+            pass
+
+    # Last resort - try /proc/stat on Linux
+    if IS_LINUX:
+        try:
+            with open('/proc/stat', 'r') as f:
+                line = f.readline()
+                if line.startswith('cpu '):
+                    parts = line.split()
+                    user = int(parts[1])
+                    nice = int(parts[2])
+                    system = int(parts[3])
+                    idle = int(parts[4])
+                    total = user + nice + system + idle
+                    cpu_usage = 100 * (total - idle) / total if total > 0 else 0
+                    return cpu_usage
+        except Exception:
+            pass
 
     return 0
 
