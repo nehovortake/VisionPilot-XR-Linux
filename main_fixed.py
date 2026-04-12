@@ -43,7 +43,7 @@ except Exception as e:
     ImageProcessor = None
 
 try:
-    from read_speed_fixed import PerceptronSpeedReader
+    from read_speed import PerceptronSpeedReader
     print("[INIT] PerceptronSpeedReader module import: OK")
 except Exception as e:
     print(f"[INIT] PerceptronSpeedReader module import FAILED: {e}")
@@ -92,20 +92,17 @@ def get_cpu_usage():
 
 
 def init_all():
-    print("
-[MAIN] ============================================")
+    print("[MAIN] ============================================")
     print("[MAIN] VisionPilot XR - Headless Mode")
     print(f"[MAIN] Platform: {platform.system()}")
     if IS_JETSON:
         print("[MAIN] Device: NVIDIA Jetson")
     print(f"[MAIN] Python: {platform.python_version()}")
-    print("[MAIN] ============================================
-")
+    print("[MAIN] ============================================")
 
     print("[MAIN] ============================================")
     print("[MAIN] Initializing all components...")
-    print("[MAIN] ============================================
-")
+    print("[MAIN] ============================================")
 
     print("[MAIN] [1/4] Initializing Camera...")
     if RealSenseCamera is None:
@@ -165,12 +162,10 @@ def init_all():
             print(f"[MAIN] ⚠ ELM327 failed: {e}")
             print("[MAIN] ⚠ ELM327 optional, continuing without vehicle speed")
 
-    print("
-[MAIN] ============================================")
+    print("[MAIN] ============================================")
     print("[MAIN] [OK] All components ready!")
     print("[MAIN] ============================================")
-    print("[MAIN] Press Ctrl+C to stop
-")
+    print("[MAIN] Press Ctrl+C to stop")
     return True
 
 
@@ -207,8 +202,7 @@ def process_frame():
         state.frame_count += 1
         return True
     except Exception as e:
-        print(f"
-[ERROR] Frame processing: {e}")
+        print(f"[ERROR] Frame processing: {e}")
         return False
 
 
@@ -226,13 +220,12 @@ def display_status():
         f"Detected sign: {detected_text} | "
         f"Read sign: {read_sign_text} km/h"
     )
-    sys.stdout.write("" + status.ljust(110))
+    sys.stdout.write("" + status.ljust(110))
     sys.stdout.flush()
 
 
 def run():
-    print("[MAIN] Starting main loop...
-")
+    print("[MAIN] Starting main loop...")
     state.running = True
     state.start_time = time.time()
 
@@ -249,12 +242,9 @@ def run():
 
 
 def shutdown():
-    print("
-
-[MAIN] ============================================")
+    print("[MAIN] ============================================")
     print("[MAIN] Generating CPU usage graph...")
-    print("[MAIN] ============================================
-")
+    print("[MAIN] ============================================")
 
     if state.camera:
         try:
@@ -283,8 +273,7 @@ def shutdown():
             graph_file = log_dir / f"cpu_graph_{time.strftime('%Y-%m-%d_%H-%M-%S')}.png"
             plt.savefig(str(graph_file), dpi=100)
             plt.close()
-            print(f"[MAIN] Graph saved to: {graph_file}
-")
+            print(f"[MAIN] Graph saved to: {graph_file}")
 
             avg = float(np.mean(state.cpu_samples)) if state.cpu_samples else 0.0
             mx = float(np.max(state.cpu_samples)) if state.cpu_samples else 0.0
@@ -296,11 +285,9 @@ def shutdown():
             print(f"[MAIN]   - Total samples: {len(state.cpu_samples)}")
             runtime = (time.time() - state.start_time) if state.start_time else 0.0
             print(f"[MAIN]   - Runtime: {runtime:.2f}s")
-            print("[MAIN] ============================================
-")
+            print("[MAIN] ============================================")
         except Exception as e:
-            print(f"[MAIN] Graph error: {e}
-")
+            print(f"[MAIN] Graph error: {e}")
 
     print("[MAIN] ============================================")
     print("[MAIN] VisionPilot XR Completed")
