@@ -168,7 +168,10 @@ class ErrorCase:
 # ======================================================
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--dataset_root", type=str, default=r"C:\Users\Minko\Desktop\DP\VisionPilot-XR Win\dataset",
+    # Use relative path from script location
+    script_root = Path(__file__).resolve().parent
+    default_dataset = str(script_root / "dataset")
+    ap.add_argument("--dataset_root", type=str, default=default_dataset,
                     help="dataset folder with class subfolders (10/20/.../130)")
     ap.add_argument("--model", type=str, default=None,
                     help="Path to mlp_speed_model.pt (default: dataset_root/mlp_speed_model.pt)")

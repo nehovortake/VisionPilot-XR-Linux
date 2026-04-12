@@ -379,9 +379,7 @@ class SpeedWeatherPanel(QFrame):
         # where sign icons live
         base_dir = os.path.dirname(os.path.abspath(__file__))
         default_dir = os.path.join(base_dir, "gui_assets", "signstocluster")
-        # user requested absolute path (keep as fallback)
-        abs_fallback = r"C:\Users\Minko\Desktop\DP\VisionPilot-XR Win\gui_assets\signstocluster"
-        self._sign_icon_dir = sign_icon_dir or (default_dir if os.path.isdir(default_dir) else abs_fallback)
+        self._sign_icon_dir = sign_icon_dir or default_dir
 
         # cache pixmaps so we don't hit disk every frame
         self._sign_cache: dict[int, QPixmap] = {}

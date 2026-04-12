@@ -1,6 +1,11 @@
+import platform
+import os
 import pyrealsense2 as rs
 import numpy as np
 import cv2
+
+# Platform detection
+IS_JETSON = platform.system() == "Linux" and os.path.exists("/etc/nv_tegra_release")
 
 
 class RealSenseCamera:

@@ -21,7 +21,9 @@ import torch.nn as nn
 # CONFIG
 # ======================================================
 
-DATASET_ROOT = Path(r"C:\Users\Minko\Desktop\DP\VisionPilot-XR Win\dataset")
+# Use relative path from script location (works on Windows, Linux, Jetson)
+SCRIPT_ROOT = Path(__file__).resolve().parent
+DATASET_ROOT = SCRIPT_ROOT / "dataset"
 MODEL_PATH = DATASET_ROOT / "mlp_speed_model_dataset_split.pt"
 
 # ======================================================

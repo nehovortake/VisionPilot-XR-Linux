@@ -10,7 +10,9 @@ from tkinter import ttk, messagebox
 import serial
 import serial.tools.list_ports
 
-LOG_DIR = r"C:\Users\Minko\Desktop\DP\VisionPilot-XR Win\CAN_logs"
+from pathlib import Path
+SCRIPT_ROOT = Path(__file__).resolve().parent
+LOG_DIR = SCRIPT_ROOT / "CAN_logs"
 
 
 def ensure_log_dir() -> str:

@@ -21,10 +21,12 @@ import matplotlib.pyplot as plt
 # CONFIG
 # ======================================================
 
-DATASET_ROOT = Path(r"C:\Users\Minko\Desktop\DP\VisionPilot-XR Win\dataset_mlp")
+# Use relative path from script location (works on Windows, Linux, Jetson)
+SCRIPT_ROOT = Path(__file__).resolve().parent
+DATASET_ROOT = SCRIPT_ROOT / "dataset"
 MODEL_PATH = DATASET_ROOT / "mlp_speed_model.pt"
 
-PROJECT_ROOT = DATASET_ROOT.parent
+PROJECT_ROOT = SCRIPT_ROOT
 REPORT_DIR = PROJECT_ROOT / "MLP_report" / "02_training_results"
 
 SPEED_CLASSES = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 130]

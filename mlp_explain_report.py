@@ -139,7 +139,10 @@ def safe_rel_name(img_path: Path, in_dir: Path) -> str:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--dataset_root", type=str, default=r"C:\Users\Minko\Desktop\DP\VisionPilot-XR Win\dataset")
+    # Use relative path from script location
+    script_root = Path(__file__).resolve().parent
+    default_dataset = str(script_root / "dataset")
+    ap.add_argument("--dataset_root", type=str, default=default_dataset)
     ap.add_argument("--model", type=str, default=None)
     ap.add_argument("--in_dir", type=str, default=None)  # ak None -> folder dialog
     ap.add_argument("--img_size", type=int, default=IMG_SIZE_DEFAULT)

@@ -4,12 +4,15 @@ import os
 import random
 import sys
 import time
+from pathlib import Path
 
 # ============================================================
 # CIEĽOVÝ PRIEČINOK
 # ============================================================
 
-OUTPUT_PATH = r"C:\Users\Minko\Desktop\DP\VisionPilot-XR Win\Py dataset"
+# Use relative path from script location (works on Windows, Linux, Jetson)
+SCRIPT_ROOT = Path(__file__).resolve().parent
+OUTPUT_PATH = SCRIPT_ROOT / "dataset"
 
 # ============================================================
 # TRIEDY

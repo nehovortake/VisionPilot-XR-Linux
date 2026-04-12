@@ -3,6 +3,7 @@
 """
 VisionPilot XR - Headless Main Script
 Runs all image processing pipelines without GUI
+Jetson Orin Nano Compatible (Python 3.8+)
 """
 
 import os
@@ -10,6 +11,7 @@ import sys
 import platform
 import time
 import threading
+import subprocess
 import cv2
 import numpy as np
 from pathlib import Path
@@ -31,6 +33,52 @@ except ImportError:
 IS_WINDOWS = platform.system() == "Windows"
 IS_LINUX = platform.system() == "Linux"
 IS_JETSON = IS_LINUX and os.path.exists("/etc/nv_tegra_release")
+
+# Jetson model detection
+JETSON_MODEL = "Unknown"
+if IS_JETSON:
+    try:
+        with open("/sys/devices/virtual/dmi/id/board_name", "r") as f:
+            JETSON_MODEL = f.read().strip()
+    except Exception:
+        pass
+
+# Python version
+PYTHON_VERSION = f"{sys.version_info.major}.{sys.version_info.minor}"
+
+# CPU monitoring function - Jetson compatible
+def get_cpu_usage():
+    """Get CPU usage on Jetson or regular Linux using tegrastats or psutil."""
+    if IS_JETSON:
+        try:
+            # Jetson: Use tegrastats (Python 3.8 compatible)
+            result = subprocess.run(
+                ["tegrastats", "--interval", "100", "--count", "1"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                universal_newlines=True,
+                timeout=2
+            )
+            for line in result.stdout.split('\n'):
+                if 'CPU' in line:
+                    import re
+                    match = re.search(r'CPU \[([^\]]+)\]', line)
+                    if match:
+                        cpu_str = match.group(1)
+                        cpus = [float(x.strip().rstrip('%')) for x in cpu_str.split(',')]
+                        return np.mean(cpus)
+            return 0
+        except Exception:
+            pass
+
+    # Fallback to psutil on other platforms or if tegrastats fails
+    if psutil is not None:
+        try:
+            return psutil.cpu_percent(interval=0.01)
+        except Exception:
+            return 0
+
+    return 0
 
 # =====================================================
 # IMPORTS
@@ -182,8 +230,13 @@ def init_elm327():
         return False
 
     try:
-        # Detect COM port on Windows, or use /dev/ttyUSB0 on Linux
-        port = "COM12" if IS_WINDOWS else "/dev/ttyUSB0"
+        # Detect COM port based on platform
+        if IS_WINDOWS:
+            port = "COM12"
+        elif IS_LINUX:
+            port = "/dev/ttyUSB0"  # Default on Jetson/Linux
+        else:
+            port = "COM12"
 
         state.elm327_reader = ELM327SpeedReader(
             port=port,
@@ -375,14 +428,11 @@ def process_frame():
             state.last_sign_print = detected_sign
             state.last_detected_value = detected_sign
 
-        # Record CPU usage
-        if psutil is not None:
-            try:
-                cpu_percent = psutil.cpu_percent(interval=0.01)
-                state.cpu_samples.append(cpu_percent)
-                state.timestamps.append(time.time() - state.start_time)
-            except Exception:
-                pass
+        # Record CPU usage (Jetson or standard)
+        cpu_percent = get_cpu_usage()
+        if cpu_percent > 0:
+            state.cpu_samples.append(cpu_percent)
+            state.timestamps.append(time.time() - state.start_time)
 
         state.frame_count += 1
         return True
@@ -515,7 +565,10 @@ def main():
 
     print("[MAIN] ============================================")
     print("[MAIN] VisionPilot XR - Headless Mode")
-    print(f"[MAIN] Platform: {platform.system()} {'(Jetson)' if IS_JETSON else ''}")
+    print(f"[MAIN] Platform: {platform.system()}")
+    if IS_JETSON:
+        print(f"[MAIN] Device: NVIDIA Jetson ({JETSON_MODEL})")
+    print(f"[MAIN] Python: {PYTHON_VERSION}")
     print("[MAIN] ============================================\n")
 
     print("[MAIN] ============================================")
@@ -592,6 +645,7 @@ def main():
         print(f"[MAIN] GUI not available, running headless mode only\n")
         # Run main loop directly
         run()
+        shutdown()
 
 if __name__ == "__main__":
     main()

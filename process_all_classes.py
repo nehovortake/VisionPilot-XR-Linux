@@ -84,9 +84,13 @@ def main():
     ap = argparse.ArgumentParser()
 
     # ✅ Default added so you can run without arguments
+    # Use relative path from script location
+    script_root = Path(__file__).resolve().parent
+    default_dataset = str(script_root / "dataset")
+
     ap.add_argument(
         "--dataset_root",
-        default=r"C:\Users\Minko\Desktop\DP\VisionPilot-XR Win\dataset",
+        default=default_dataset,
         help="Root folder containing class subfolders 10, 20, 30..."
     )
 
