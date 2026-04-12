@@ -1,4 +1,4 @@
-# qt_read_sign.py
+# qt_read_sign.py (pôvodný - funguje správne!)
 # ------------------------------------------------------
 # MLP (PyTorch) reader – reads speed from ellipse crop (BGR)
 # - loads: dataset/mlp_speed_model.pt
@@ -170,21 +170,14 @@ if TORCH_AVAILABLE:
             self.min_margin = 0.35            # confidence threshold (top1-top2)
             self.min_votes = 4                # votes required to accept winner
 
-            # ==========================
-            # SOFTMAX PRAHOVANIE (školiteľ)
-            # ==========================
-            # Ak najvyššia softmax pravdepodobnosť na výstupe MLP neprekročí
-            # tento prah, predikcia sa zahodí (crop nie je platná značka).
-            # Typické hodnoty: 0.70 – 0.90  (vyšší = prísnejší filter)
-            self.min_softmax_prob = 0.9
-
             self._load_model(model_path)
 
         def _load_model(self, path: Path):
             if not path.exists():
                 raise FileNotFoundError(f"MLP model not found: {path}")
 
-            checkpoint = torch.load(str(path), map_location="cpu")
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            checkpoint = torch.load(str(path), map_location=device)
 
             # required keys from training save
             class_labels = checkpoint.get("class_labels", None)
@@ -220,9 +213,15 @@ if TORCH_AVAILABLE:
 
             self.model.load_state_dict(state, strict=True)
 
+            if torch.cuda.is_available():
+                try:
+                    self.model = self.model.to("cuda")
+                except Exception:
+                    pass
+
             self.model.eval()
 
-            print(f"[MLP] Loaded | classes={self.labels} | img={self.img_size}")
+            print(f"[MLP] Loaded | classes={self.labels} | img={self.img_size} | device={next(self.model.parameters()).device}")
 
         # --------------------------------------------------
         # helpers
@@ -241,11 +240,10 @@ if TORCH_AVAILABLE:
         # ==================================================
         # MAIN API – CALL THIS FROM IMAGE PROCESSOR
         # ==================================================
-        def predict_from_crop(self, crop_bgr: np.ndarray):
-            # type: (np.ndarray) -> Optional[int]
+        def predict_from_crop(self, crop_bgr: np.ndarray) -> int | None:
             """
             crop_bgr : np.ndarray (BGR) – ellipse crop
-            return   : Optional[int] (speed km/h)
+            return   : int | None (speed km/h)
             """
             try:
                 if crop_bgr is None or crop_bgr.size == 0:
@@ -257,7 +255,6 @@ if TORCH_AVAILABLE:
                 best_label: int | None = None
                 best_margin: float = -1e9
                 best_maxlogit: float = -1e9
-                best_prob: float = 0.0       # najvyššia softmax pravdepodobnosť
 
                 # try multiple preprocessing variants and pick the most confident
                 for _name, cfg in RUNTIME_PREPROCESS_VARIANTS:
@@ -277,52 +274,44 @@ if TORCH_AVAILABLE:
 
                     x = (patch.astype(np.float32) / 255.0).reshape(1, -1)  # (1,4096)
                     x_tensor = torch.from_numpy(x)
+                    try:
+                        x_tensor = x_tensor.to(next(self.model.parameters()).device)
+                    except Exception:
+                        pass
 
                     with torch.no_grad():
                         out = self.model(x_tensor)  # (1,num_classes)
 
                     logits = out.squeeze(0).cpu().numpy()
+                    idx = int(np.argmax(logits))
 
-                    # --- SOFTMAX prahovanie (školiteľ) ---
-                    # Aplikujeme softmax na výstupnú vrstvu MLP
-                    # a prahujeme najvyššiu pravdepodobnosť
-                    exp_logits = np.exp(logits - logits.max())  # numericky stabilný softmax
-                    probs = exp_logits / exp_logits.sum()
+                    # Validate index is within range
+                    if idx < 0 or idx >= len(self.labels):
+                        continue
 
-                    idx = int(np.argmax(probs))
                     pred_label = int(self.labels[idx])
-                    top_prob = float(probs[idx])
 
                     margin = self._margin_top1_top2(logits)
                     maxlogit = float(logits[idx])
 
-                    # pick: higher softmax prob, tie-break by margin
-                    if (top_prob > best_prob) or (top_prob == best_prob and margin > best_margin):
+                    # pick: higher margin, tie-break by higher maxlogit
+                    if (margin > best_margin) or (margin == best_margin and maxlogit > best_maxlogit):
                         best_margin = margin
                         best_maxlogit = maxlogit
                         best_label = pred_label
-                        best_prob = top_prob
 
                 # nothing worked
                 if best_label is None:
                     return self.last_stable
 
                 # ==========================
-                # 1) SOFTMAX PRAH (školiteľ)
-                # ==========================
-                # Ak najvyššia softmax pravdepodobnosť neprekročí prah,
-                # crop nie je platná značka (falošná elipsa) → zahodiť.
-                if best_prob < self.min_softmax_prob:
-                    return self.last_stable
-
-                # ==========================
-                # 2) CONFIDENCE GATE (margin)
+                # 1) CONFIDENCE GATE
                 # ==========================
                 if best_margin < self.min_margin:
                     return self.last_stable
 
                 # ==========================
-                # 3) TEMPORAL STABILIZATION (majority vote)
+                # 2) TEMPORAL STABILIZATION (majority vote)
                 # ==========================
                 self.pred_hist.append(best_label)
 
@@ -352,5 +341,4 @@ else:
         def predict_from_crop(self, crop_bgr):
             """Without PyTorch, cannot classify speed - return None."""
             return None
-
 
