@@ -340,6 +340,10 @@ class ImageProcessor:
         self.speed_reader = None
         self.last_speed = None
         self.read_sign_enabled = False
+
+        # Detection state for current frame
+        self.sign_detected_this_frame = False
+
         # weather tracking
         self.last_weather = None
 
@@ -556,12 +560,17 @@ class ImageProcessor:
                 _rois = None
 
             for det in ellipse_crops:
+                # Mark that we detected a sign in this frame
+                self.sign_detected_this_frame = True
+
                 cx = int(det['center']['x'])
                 cy = int(det['center']['y'])
+                major = int(det['axes']['major'])
+                minor = int(det['axes']['minor'])
 
                 # store sign center + ROI hit flags for UI
                 try:
-                    self.last_sign_center = (cx, cy)
+                    self.last_sign_center = (cx, cy, major // 2, minor // 2)
                     if _rois is not None:
                         for ridx, (x1, y1, x2, y2) in enumerate(_rois):
                             if x1 <= cx < x2 and y1 <= cy < y2:
@@ -570,9 +579,7 @@ class ImageProcessor:
                 except Exception:
                     pass
 
-                major = int(det['axes']['major'])
-                minor = int(det['axes']['minor'])
-
+                # Use previously extracted major/minor
                 half_w = major // 2
                 half_h = minor // 2
 
