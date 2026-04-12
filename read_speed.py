@@ -348,24 +348,9 @@ else:
         def __init__(self, *args, **kwargs):
             # Silent initialization - warning already shown at import time
             self.model = None
-            self.last_stable = 50  # Default fallback speed
 
         def predict_from_crop(self, crop_bgr):
-            """Without PyTorch, estimate speed based on image size as fallback."""
-            if crop_bgr is None or crop_bgr.size == 0:
-                return None
+            """Without PyTorch, cannot classify speed - return None."""
+            return None
 
-            # Estimate speed based on ellipse/crop size
-            # Larger crop = closer sign = higher speed (heuristic)
-            h, w = crop_bgr.shape[:2] if len(crop_bgr.shape) >= 2 else (0, 0)
-            size = max(h, w)
-
-            # Simple heuristic: scale size to speed range (20-130 km/h)
-            if size > 0:
-                estimated_speed = int(20 + (size / 200.0) * 110)  # 20-130 km/h range
-                estimated_speed = max(20, min(130, estimated_speed))  # Clamp to valid range
-                self.last_stable = estimated_speed
-                return estimated_speed
-
-            return self.last_stable
 
