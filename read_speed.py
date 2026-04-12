@@ -346,7 +346,7 @@ else:
     # PyTorch not available - provide dummy class
     class PerceptronSpeedReader:
         def __init__(self, *args, **kwargs):
-            print("[MLP] Error: PyTorch not installed, PerceptronSpeedReader unavailable")
+            # Silent initialization - warning already shown at import time
             self.model = None
 
         def predict_from_crop(self, *args, **kwargs):

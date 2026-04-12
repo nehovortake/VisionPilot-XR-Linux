@@ -97,11 +97,13 @@ except Exception as e:
 try:
     from read_speed import PerceptronSpeedReader
 except Exception as e:
+    print(f"[MAIN] Import warning: PerceptronSpeedReader - {e}")
     PerceptronSpeedReader = None
 
 try:
     from elm327_can_speed import ELM327SpeedReader
 except Exception as e:
+    print(f"[MAIN] Import warning: ELM327SpeedReader - {e}")
     ELM327SpeedReader = None
 
 
@@ -207,7 +209,7 @@ def init_processor():
 def init_speed_reader():
     """Initialize MLP speed reader."""
     if PerceptronSpeedReader is None:
-        print("[MAIN] PerceptronSpeedReader not available")
+        print("[MAIN] ⚠ MLP Speed Reader not available (optional)")
         return False
 
     try:
@@ -215,7 +217,7 @@ def init_speed_reader():
         print("[MAIN] [OK] MLP Speed Reader initialized")
         return True
     except Exception as e:
-        print(f"[MAIN] [NO] Failed to initialize speed reader: {e}")
+        print(f"[MAIN] ⚠ MLP Speed Reader initialization failed: {e} (optional)")
         state.speed_reader = None
         return False
 
@@ -226,7 +228,7 @@ def init_speed_reader():
 def init_elm327():
     """Initialize ELM327 CAN speed reader."""
     if ELM327SpeedReader is None:
-        print("[MAIN] ELM327SpeedReader not available")
+        print("[MAIN] ⚠ ELM327SpeedReader not available (optional)")
         return False
 
     try:
@@ -240,7 +242,7 @@ def init_elm327():
         print(f"[MAIN] [OK] ELM327 reader started on {state.elm327_reader.port}")
         return True
     except Exception as e:
-        print(f"[MAIN] [NO] Failed to initialize ELM327: {e}")
+        print(f"[MAIN] ⚠ Failed to initialize ELM327: {e} (optional)")
         state.elm327_reader = None
         return False
 
