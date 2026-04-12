@@ -4,6 +4,7 @@
 # - loads: dataset/mlp_speed_model.pt
 # - preprocess variants: crop (2-digit) + pad (3-digit safe)
 # - stabilization: confidence gate (margin) + majority vote
+# WITH SOFTMAX THRESHOLD (from Windows working version)
 # ------------------------------------------------------
 
 from __future__ import annotations
@@ -170,6 +171,14 @@ if TORCH_AVAILABLE:
             self.min_margin = 0.35            # confidence threshold (top1-top2)
             self.min_votes = 4                # votes required to accept winner
 
+            # ==========================
+            # SOFTMAX PRAHOVANIE (from Windows version - IMPORTANT!)
+            # ==========================
+            # Ak najvyššia softmax pravdepodobnosť na výstupe MLP neprekročí
+            # tento prah, predikcia sa zahodí (crop nie je platná značka).
+            # Typické hodnoty: 0.70 – 0.90  (vyšší = prísnejší filter)
+            self.min_softmax_prob = 0.9
+
             self._load_model(model_path)
 
         def _load_model(self, path: Path):
@@ -177,7 +186,7 @@ if TORCH_AVAILABLE:
                 raise FileNotFoundError(f"MLP model not found: {path}")
 
             device = "cuda" if torch.cuda.is_available() else "cpu"
-            checkpoint = torch.load(str(path), map_location=device)
+            checkpoint = torch.load(str(path), map_location=device, weights_only=False)
 
             # required keys from training save
             class_labels = checkpoint.get("class_labels", None)
@@ -255,6 +264,7 @@ if TORCH_AVAILABLE:
                 best_label: int | None = None
                 best_margin: float = -1e9
                 best_maxlogit: float = -1e9
+                best_prob: float = 0.0       # najvyššia softmax pravdepodobnosť
 
                 # try multiple preprocessing variants and pick the most confident
                 for _name, cfg in RUNTIME_PREPROCESS_VARIANTS:
@@ -283,30 +293,47 @@ if TORCH_AVAILABLE:
                         out = self.model(x_tensor)  # (1,num_classes)
 
                     logits = out.squeeze(0).cpu().numpy()
-                    idx = int(np.argmax(logits))
+
+                    # --- SOFTMAX prahovanie (Windows version - CRITICAL!) ---
+                    # Aplikujeme softmax na výstupnú vrstvu MLP
+                    # a prahujeme najvyššiu pravdepodobnosť
+                    exp_logits = np.exp(logits - logits.max())  # numericky stabilný softmax
+                    probs = exp_logits / exp_logits.sum()
+
+                    idx = int(np.argmax(probs))
                     pred_label = int(self.labels[idx])
+                    top_prob = float(probs[idx])
 
                     margin = self._margin_top1_top2(logits)
                     maxlogit = float(logits[idx])
 
-                    # pick: higher margin, tie-break by higher maxlogit
-                    if (margin > best_margin) or (margin == best_margin and maxlogit > best_maxlogit):
+                    # pick: higher softmax prob, tie-break by margin
+                    if (top_prob > best_prob) or (top_prob == best_prob and margin > best_margin):
                         best_margin = margin
                         best_maxlogit = maxlogit
                         best_label = pred_label
+                        best_prob = top_prob
 
                 # nothing worked
                 if best_label is None:
                     return self.last_stable
 
                 # ==========================
-                # 1) CONFIDENCE GATE
+                # 1) SOFTMAX PRAH (Windows version - THIS WAS MISSING!)
+                # ==========================
+                # Ak najvyššia softmax pravdepodobnosť neprekročí prah,
+                # crop nie je platná značka (falošná elipsa) → zahodiť.
+                if best_prob < self.min_softmax_prob:
+                    return self.last_stable
+
+                # ==========================
+                # 2) CONFIDENCE GATE
                 # ==========================
                 if best_margin < self.min_margin:
                     return self.last_stable
 
                 # ==========================
-                # 2) TEMPORAL STABILIZATION (majority vote)
+                # 3) TEMPORAL STABILIZATION (majority vote)
                 # ==========================
                 self.pred_hist.append(best_label)
 
