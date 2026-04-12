@@ -9,6 +9,18 @@ Jetson Orin Nano Compatible (Python 3.8+)
 import os
 import sys
 import platform
+
+# FIX: LD_PRELOAD for PyTorch on Jetson with Python 3.8
+# (solves: "cannot allocate memory in static TLS block")
+if platform.system() == 'Linux':
+    for lib_path in [
+        '/usr/lib/aarch64-linux-gnu/libgomp.so.1',
+        '/usr/lib/aarch64-linux-gnu/libgomp.so',
+        '/usr/lib/libgomp.so.1',
+    ]:
+        if os.path.exists(lib_path):
+            os.environ['LD_PRELOAD'] = lib_path
+            break
 import time
 import threading
 import subprocess
