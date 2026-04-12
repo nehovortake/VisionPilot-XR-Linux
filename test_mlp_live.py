@@ -6,18 +6,23 @@ MLP Test - Without NumPy conversion (works around PyTorch NumPy API issue)
 import os
 import sys
 
-# Fix LD_PRELOAD
+# FIX LD_PRELOAD FIRST - BEFORE ANY OTHER IMPORTS
+# Must be set before PyTorch loads!
 if sys.platform.startswith('linux'):
-    for lib_path in [
+    lib_paths = [
         '/usr/lib/aarch64-linux-gnu/libgomp.so.1',
         '/usr/lib/aarch64-linux-gnu/libgomp.so',
         '/usr/lib/libgomp.so.1',
-    ]:
+    ]
+
+    for lib_path in lib_paths:
         if os.path.exists(lib_path):
             os.environ['LD_PRELOAD'] = lib_path
+            print(f"[SETUP] LD_PRELOAD = {lib_path}")
             break
+    else:
+        print("[SETUP] ⚠ libgomp not found, trying anyway...")
 
-print("[SETUP] LD_PRELOAD set")
 print()
 
 # Test MLP directly on live camera

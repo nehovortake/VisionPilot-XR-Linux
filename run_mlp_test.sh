@@ -1,20 +1,12 @@
 #!/bin/bash
-# Run MLP debug test on Jetson
+# Wrapper script - sets LD_PRELOAD in shell BEFORE Python starts
 
-echo "[JETSON] Running MLP Speed Reading Debug Test"
+export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libgomp.so.1
+
+echo "[WRAPPER] LD_PRELOAD=$LD_PRELOAD"
 echo ""
 
 cd ~/Desktop/VisionPilot-XR-Linux
 
-# Run test
-python3 test_mlp_debug.py
-
-echo ""
-echo "[JETSON] Test completed - check output above"
-echo ""
-echo "If speed is None:"
-echo "  1. Check min_margin (currently 0.15)"
-echo "  2. Check min_votes (currently 4)"
-echo "  3. Look at margin value in debug output"
-echo ""
+python3 test_mlp_live.py
 
