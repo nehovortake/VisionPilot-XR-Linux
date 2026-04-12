@@ -255,6 +255,7 @@ if TORCH_AVAILABLE:
                 best_label: int | None = None
                 best_margin: float = -1e9
                 best_maxlogit: float = -1e9
+                variant_count = 0
 
                 # try multiple preprocessing variants and pick the most confident
                 for _name, cfg in RUNTIME_PREPROCESS_VARIANTS:
@@ -293,6 +294,8 @@ if TORCH_AVAILABLE:
 
                     margin = self._margin_top1_top2(logits)
                     maxlogit = float(logits[idx])
+
+                    variant_count += 1
 
                     # pick: higher margin, tie-break by higher maxlogit
                     if (margin > best_margin) or (margin == best_margin and maxlogit > best_maxlogit):
