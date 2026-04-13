@@ -2,10 +2,6 @@
 # -*- coding: utf-8 -*-
 """
 VisionPilot XR - Simple Tkinter GUI + one-line terminal status
-- Small Tkinter preview window for visual control
-- One single updating terminal line:
-  Vehicle speed | Detection | Read sign
-- No cv2.imshow(), so no OpenCV Qt window backend spam
 """
 
 import os
@@ -15,6 +11,7 @@ import platform
 import traceback
 import tkinter as tk
 from pathlib import Path
+from collections import Counter
 
 import cv2
 import numpy as np
@@ -23,18 +20,10 @@ from PIL import Image, ImageTk
 print(f"[INIT] LD_PRELOAD={os.environ.get('LD_PRELOAD', 'Not set')}")
 
 try:
-    import psutil
-except ImportError:
-    psutil = None
-
-try:
     import matplotlib.pyplot as plt
 except ImportError:
     plt = None
 
-# ---------------------------------------------------------
-# Imports
-# ---------------------------------------------------------
 try:
     from realsense import RealSenseCamera
     print("[INIT] RealSenseCamera: OK")
@@ -43,11 +32,15 @@ except Exception as e:
     RealSenseCamera = None
 
 try:
-    from image_processing import ImageProcessor
+    import image_processing as image_processing_module
+    from image_processing import ImageProcessor, start_process_log, stop_process_log
     print("[INIT] ImageProcessor: OK")
 except Exception as e:
     print(f"[INIT] ImageProcessor import FAILED: {e}")
+    image_processing_module = None
     ImageProcessor = None
+    start_process_log = None
+    stop_process_log = None
 
 try:
     from read_speed import PerceptronSpeedReader
@@ -79,6 +72,55 @@ IS_LINUX = platform.system() == "Linux"
 IS_JETSON = IS_LINUX and os.path.exists("/etc/nv_tegra_release")
 
 
+class JetsonCPUMonitor:
+    def __init__(self):
+        self.prev_total = None
+        self.prev_idle = None
+
+    def read(self):
+        try:
+            with open("/proc/stat", "r", encoding="utf-8") as f:
+                line = f.readline().strip()
+
+            parts = line.split()
+            if not parts or parts[0] != "cpu":
+                return 0.0
+
+            values = list(map(int, parts[1:]))
+
+            user = values[0]
+            nice = values[1]
+            system = values[2]
+            idle = values[3]
+            iowait = values[4] if len(values) > 4 else 0
+            irq = values[5] if len(values) > 5 else 0
+            softirq = values[6] if len(values) > 6 else 0
+            steal = values[7] if len(values) > 7 else 0
+
+            idle_all = idle + iowait
+            non_idle = user + nice + system + irq + softirq + steal
+            total = idle_all + non_idle
+
+            if self.prev_total is None or self.prev_idle is None:
+                self.prev_total = total
+                self.prev_idle = idle_all
+                return 0.0
+
+            total_diff = total - self.prev_total
+            idle_diff = idle_all - self.prev_idle
+
+            self.prev_total = total
+            self.prev_idle = idle_all
+
+            if total_diff <= 0:
+                return 0.0
+
+            cpu_percent = 100.0 * (1.0 - (idle_diff / total_diff))
+            return max(0.0, min(cpu_percent, 100.0))
+        except Exception:
+            return 0.0
+
+
 class State:
     def __init__(self):
         self.running = False
@@ -100,24 +142,51 @@ class State:
         self.cpu_samples = []
         self.timestamps = []
         self.last_display_time = 0.0
-        self.last_status_text = ""
+        self.last_status_len = 0
+
+        self.last_cpu = 0.0
+        self.last_proc_ms = 0.0
+        self.last_capture_ms = 0.0
+        self.last_overlay_ms = 0.0
+        self.last_frame_ms = 0.0
+        self.last_fps = 0.0
+        self.prev_frame_end = None
+        self.cpu_monitor = JetsonCPUMonitor()
 
         self.tk_root = None
         self.tk_label = None
         self.tk_status = None
         self.tk_img = None
+        self.process_crop_ratio = 0.60  # match original gui.py style: top 3/5 of frame
+
+        # Graph logging
+        self.output_fps_samples = []
+        self.camera_fps_samples = []
+        self.proc_ms_samples = []
+        self.total_ms_samples = []
+        self.capture_ms_samples = []
+        self.red_ms_samples = []
+        self.canny_ms_samples = []
+        self.ellipse_ms_samples = []
+        self.read_sign_ms_samples = []
+        self.graph_timestamps = []
+        self.detection_events = []
+        self.last_camera_frame_end = None
+        self.process_log_last_len = 0
 
 
 state = State()
 
 
 def get_cpu_usage():
-    if psutil is not None:
-        try:
-            return psutil.cpu_percent(interval=0.001)
-        except Exception:
-            pass
-    return 0.0
+    return state.cpu_monitor.read()
+
+
+def on_vehicle_speed(speed):
+    try:
+        state.vehicle_speed = int(speed)
+    except Exception:
+        pass
 
 
 def init_all():
@@ -130,7 +199,7 @@ def init_all():
         print("[MAIN] [NO] RealSenseCamera not available")
         return False
     try:
-        state.camera = RealSenseCamera(width=1920, height=1080, fps=30)
+        state.camera = RealSenseCamera(width=1280, height=720, fps=30)
         state.camera.start()
         print("[MAIN] [OK] Camera initialized")
     except Exception as e:
@@ -147,7 +216,16 @@ def init_all():
         state.processor.enable_canny = True
         state.processor.enable_ellipse = True
         state.processor.read_sign_enabled = True
-        print("[MAIN] [OK] Processor initialized")
+        if start_process_log is not None:
+            try:
+                start_process_log()
+                state.process_log_last_len = 0
+                print("[MAIN] [OK] Processor initialized + process logging enabled")
+            except Exception as log_e:
+                print(f"[MAIN] [WARN] Process log start failed: {log_e}")
+                print("[MAIN] [OK] Processor initialized")
+        else:
+            print("[MAIN] [OK] Processor initialized")
     except Exception as e:
         print(f"[MAIN] [NO] Processor failed: {e}")
         return False
@@ -160,7 +238,13 @@ def init_all():
             state.speed_reader = PerceptronSpeedReader()
             state.processor.speed_reader = state.speed_reader
             state.processor.read_sign_enabled = True
-            print("[MAIN] [OK] MLP Reader initialized")
+
+            try:
+                dummy = np.zeros((64, 64, 3), dtype=np.uint8)
+                state.speed_reader.predict_from_crop(dummy)
+                print("[MAIN] [OK] MLP Reader initialized (warmed up)")
+            except Exception:
+                print("[MAIN] [OK] MLP Reader initialized")
         except Exception as e:
             print(f"[MAIN] [WARN] MLP Reader failed: {e}")
             state.speed_reader = None
@@ -170,7 +254,7 @@ def init_all():
         print("[MAIN] [WARN] ELM327 not available (optional)")
     else:
         try:
-            state.elm327_reader = ELM327SpeedReader()
+            state.elm327_reader = ELM327SpeedReader(callback=on_vehicle_speed)
             state.elm327_reader.start()
             print("[MAIN] [OK] ELM327 reader started")
         except Exception as e:
@@ -196,6 +280,17 @@ def build_overlay_frame(frame_bgr: np.ndarray) -> np.ndarray:
     cv2.putText(frame, f"Read sign: {read_sign_text} km/h", (20, 130),
                 cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 255), 2)
 
+    cv2.putText(frame, f"Proc: {state.last_proc_ms:6.2f} ms", (20, 175),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+    cv2.putText(frame, f"Cap: {state.last_capture_ms:6.2f} ms", (20, 210),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+    cv2.putText(frame, f"Total: {state.last_frame_ms:6.2f} ms", (20, 245),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+    cv2.putText(frame, f"FPS: {state.last_fps:5.1f}", (20, 280),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+    cv2.putText(frame, f"CPU: {state.last_cpu:5.1f}%", (20, 315),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+
     sc = state.sign_center
     if sc is not None:
         try:
@@ -211,14 +306,77 @@ def build_overlay_frame(frame_bgr: np.ndarray) -> np.ndarray:
     return frame
 
 
+
+def _safe_ms(value):
+    try:
+        if value is None:
+            return 0.0
+        return float(value)
+    except Exception:
+        return 0.0
+
+
+def _record_pipeline_metrics(now_rel_s: float):
+    if image_processing_module is None:
+        return
+
+    try:
+        proc_log = getattr(image_processing_module, "_process_log", None)
+        if proc_log is None:
+            return
+
+        proc_log_len = len(proc_log)
+        if proc_log_len <= state.process_log_last_len:
+            return
+
+        last_entry = proc_log[-1]
+        state.process_log_last_len = proc_log_len
+
+        state.red_ms_samples.append(_safe_ms(last_entry.get("red_ms")))
+        state.canny_ms_samples.append(_safe_ms(last_entry.get("canny_ms")))
+        state.ellipse_ms_samples.append(_safe_ms(last_entry.get("ellipse_ms")))
+        state.read_sign_ms_samples.append(_safe_ms(last_entry.get("read_sign_ms")))
+
+        detected_speed = last_entry.get("detected_speed")
+        read_count = int(last_entry.get("read_sign_count") or 0)
+        if detected_speed is None:
+            if read_count > 0:
+                state.detection_events.append("No read")
+            else:
+                state.detection_events.append("No detection")
+        else:
+            state.detection_events.append(str(int(detected_speed)))
+    except Exception:
+        state.red_ms_samples.append(0.0)
+        state.canny_ms_samples.append(0.0)
+        state.ellipse_ms_samples.append(0.0)
+        state.read_sign_ms_samples.append(0.0)
+        state.detection_events.append("No detection")
+
+
 def process_frame():
     if state.camera is None or state.processor is None:
         return False
 
+    frame_start = time.perf_counter()
+
     try:
+        t_cap = time.perf_counter()
         ok, frame = state.camera.read()
+        cap_end = time.perf_counter()
+        state.last_capture_ms = (cap_end - t_cap) * 1000.0
         if not ok or frame is None:
             return False
+
+        if state.last_camera_frame_end is not None:
+            cam_dt = cap_end - state.last_camera_frame_end
+            if cam_dt > 0:
+                state.camera_fps_samples.append(1.0 / cam_dt)
+            else:
+                state.camera_fps_samples.append(0.0)
+        else:
+            state.camera_fps_samples.append(0.0)
+        state.last_camera_frame_end = cap_end
 
         state.current_frame = frame.copy()
 
@@ -227,7 +385,6 @@ def process_frame():
         state.processor.enable_ellipse = True
         state.processor.read_sign_enabled = (state.speed_reader is not None)
 
-        # reset frame-local outputs if the processor uses persistent state
         try:
             state.processor.last_sign_center = None
         except Exception:
@@ -237,28 +394,70 @@ def process_frame():
         except Exception:
             pass
 
-        processed = state.processor.process(frame)
+        # Match original gui.py behavior: process only the top 3/5 of the frame.
+        frame_h, frame_w = frame.shape[:2]
+        crop_h = max(1, int(frame_h * state.process_crop_ratio))
+        proc_frame = frame[:crop_h, :]
 
-        state.sign_center = getattr(state.processor, "last_sign_center", None)
+        t_proc = time.perf_counter()
+        processed = state.processor.process(proc_frame)
+        state.last_proc_ms = (time.perf_counter() - t_proc) * 1000.0
+
+        raw_sign_center = getattr(state.processor, "last_sign_center", None)
+        if raw_sign_center is not None:
+            state.sign_center = raw_sign_center
+        else:
+            state.sign_center = None
+
         state.detected_sign = getattr(state.processor, "last_speed", None)
-
-        # Detection = ellipse/sign localization found
         state.sign_detected_status = state.sign_center is not None
 
-        # Use processed image if returned, otherwise overlay original
+        # Build a full-size preview frame while only showing processed result in the top crop area.
+        base = frame.copy()
         if isinstance(processed, np.ndarray) and processed.size > 0:
             if len(processed.shape) == 2:
                 processed = cv2.cvtColor(processed, cv2.COLOR_GRAY2BGR)
-            base = processed
-        else:
-            base = frame
+            try:
+                if processed.shape[:2] == proc_frame.shape[:2]:
+                    base[:crop_h, :] = processed
+                else:
+                    resized_processed = cv2.resize(processed, (frame_w, crop_h), interpolation=cv2.INTER_AREA)
+                    base[:crop_h, :] = resized_processed
+            except Exception:
+                pass
 
+        t_ov = time.perf_counter()
         state.preview_frame = build_overlay_frame(base)
+        state.last_overlay_ms = (time.perf_counter() - t_ov) * 1000.0
+
+        frame_end = time.perf_counter()
+        state.last_frame_ms = (frame_end - frame_start) * 1000.0
+
+        instant_output_fps = 0.0
+        if state.prev_frame_end is not None:
+            dt = frame_end - state.prev_frame_end
+            if dt > 0:
+                instant_output_fps = 1.0 / dt
+                if state.last_fps <= 0:
+                    state.last_fps = instant_output_fps
+                else:
+                    state.last_fps = 0.85 * state.last_fps + 0.15 * instant_output_fps
+        state.prev_frame_end = frame_end
 
         cpu = get_cpu_usage()
+        state.last_cpu = cpu
+
+        now_rel_s = time.time() - state.start_time
         if cpu >= 0:
             state.cpu_samples.append(cpu)
-            state.timestamps.append(time.time() - state.start_time)
+            state.timestamps.append(now_rel_s)
+
+        state.graph_timestamps.append(now_rel_s)
+        state.output_fps_samples.append(instant_output_fps if instant_output_fps > 0 else state.last_fps)
+        state.proc_ms_samples.append(float(state.last_proc_ms))
+        state.total_ms_samples.append(float(state.last_frame_ms))
+        state.capture_ms_samples.append(float(state.last_capture_ms))
+        _record_pipeline_metrics(now_rel_s)
 
         state.frame_count += 1
         return True
@@ -270,7 +469,7 @@ def process_frame():
 
 def display_status():
     now = time.time()
-    if now - state.last_display_time < 0.1:
+    if now - state.last_display_time < 0.15:
         return
 
     state.last_display_time = now
@@ -278,15 +477,40 @@ def display_status():
     detected_text = "Yes" if state.sign_detected_status else "No"
     read_sign_text = str(state.detected_sign) if state.detected_sign is not None else "--"
 
+    # Keep terminal status SHORT so it never wraps in a normal terminal width.
     status = (
-        f"Vehicle speed: {state.vehicle_speed} km/h | "
-        f"Detection: {detected_text} | "
-        f"Read sign: {read_sign_text} km/h"
+        f"V:{state.vehicle_speed:>3} "
+        f"D:{detected_text[0]} "
+        f"S:{read_sign_text:>3} "
+        f"P:{state.last_proc_ms:4.0f} "
+        f"C:{state.last_capture_ms:4.0f} "
+        f"T:{state.last_frame_ms:4.0f} "
+        f"F:{state.last_fps:4.1f} "
+        f"CPU:{state.last_cpu:4.0f}"
     )
 
-    # ✅ ANSI escape → spoľahlivé prepisovanie riadku
-    sys.stdout.write("\033[2K\r" + status)
+    if state.tk_status is not None:
+        try:
+            gui_status = (
+                f"Vehicle speed: {state.vehicle_speed} km/h | "
+                f"Detection: {detected_text} | "
+                f"Read sign: {read_sign_text} km/h | "
+                f"Proc: {state.last_proc_ms:6.2f} ms | "
+                f"Cap: {state.last_capture_ms:6.2f} ms | "
+                f"Total: {state.last_frame_ms:6.2f} ms | "
+                f"FPS: {state.last_fps:5.1f} | "
+                f"CPU: {state.last_cpu:5.1f}% | "
+                f"Crop: top {int(state.process_crop_ratio*100)}%"
+            )
+            state.tk_status.configure(text=gui_status)
+        except Exception:
+            pass
+
+    # Strict single-line overwrite.
+    # Use carriage return + ANSI clear-to-end-of-line so only one terminal row is reused.
+    sys.stdout.write("\r\033[K" + status)
     sys.stdout.flush()
+    state.last_status_len = len(status)
 
 
 def on_tk_close():
@@ -303,7 +527,7 @@ def init_tk():
 
     title = tk.Label(
         root,
-        text="VisionPilot XR",
+        text="VisionPilot XR (HD 1280x720)",
         font=("Arial", 16, "bold"),
         fg="white",
         bg="#101010"
@@ -315,7 +539,9 @@ def init_tk():
         text="Waiting for frames...",
         font=("Consolas", 11),
         fg="#7CFC90",
-        bg="#101010"
+        bg="#101010",
+        wraplength=940,
+        justify="left"
     )
     status.pack(pady=(0, 8))
 
@@ -407,27 +633,119 @@ def shutdown():
         except Exception:
             pass
 
-    if plt is not None and len(state.cpu_samples) > 0:
+    if stop_process_log is not None:
         try:
-            plt.figure(figsize=(12, 6))
-            plt.plot(state.timestamps, state.cpu_samples, linewidth=2)
-            plt.xlabel("Time (s)")
-            plt.ylabel("CPU Usage (%)")
-            plt.title("CPU Usage During VisionPilot XR")
-            plt.grid(True, alpha=0.3)
-            plt.ylim(0, 100)
+            stop_process_log()
+        except Exception as e:
+            print(f"[MAIN] Process log stop warning: {e}")
 
-            avg = float(np.mean(state.cpu_samples))
-            plt.text(0.5, 0.95, f"Avg: {avg:.1f}%", transform=plt.gca().transAxes, ha="center")
+    if plt is not None:
+        log_dir = Path("log_files")
+        log_dir.mkdir(exist_ok=True)
+        timestamp = time.strftime('%Y-%m-%d_%H-%M-%S')
 
-            log_dir = Path("log_files")
-            log_dir.mkdir(exist_ok=True)
-            graph_file = log_dir / f"cpu_graph_{time.strftime('%Y-%m-%d_%H-%M-%S')}.png"
-            plt.savefig(str(graph_file), dpi=100)
-            print(f"[MAIN] Graph saved: {graph_file}")
+        def _save_current_plot(out_path: Path):
+            plt.tight_layout()
+            plt.savefig(str(out_path), dpi=100)
+            plt.close()
+            print(f"[MAIN] Graph saved: {out_path}")
+
+        try:
+            if len(state.cpu_samples) > 0:
+                plt.figure(figsize=(12, 6))
+                plt.plot(state.timestamps, state.cpu_samples, linewidth=2)
+                plt.xlabel("Čas (s)")
+                plt.ylabel("Využitie CPU (%)")
+                plt.title("Využitie CPU počas behu VisionPilot XR")
+                plt.grid(True, alpha=0.3)
+                plt.ylim(0, 100)
+                avg = float(np.mean(state.cpu_samples))
+                plt.text(0.5, 0.95, f"Priemer: {avg:.1f}%", transform=plt.gca().transAxes, ha="center")
+                _save_current_plot(log_dir / f"cpu_graph_{timestamp}.png")
+
+            if len(state.graph_timestamps) > 0 and len(state.output_fps_samples) > 0:
+                x = state.graph_timestamps
+                cam = state.camera_fps_samples[:len(x)]
+                out = state.output_fps_samples[:len(x)]
+                if len(cam) < len(x):
+                    cam = cam + [0.0] * (len(x) - len(cam))
+                if len(out) < len(x):
+                    out = out + [0.0] * (len(x) - len(out))
+
+                plt.figure(figsize=(12, 6))
+                avg_cam = float(np.mean(cam)) if len(cam) > 0 else 0.0
+                avg_out = float(np.mean(out)) if len(out) > 0 else 0.0
+                plt.plot(x, cam, linewidth=2, label=f"FPS kamery (priemer {avg_cam:.1f})")
+                plt.plot(x, out, linewidth=2, label=f"FPS po spracovaní (priemer {avg_out:.1f})")
+                plt.xlabel("Čas (s)")
+                plt.ylabel("FPS")
+                plt.title("Porovnanie FPS kamery a výstupných FPS")
+                plt.grid(True, alpha=0.3)
+                plt.legend()
+                _save_current_plot(log_dir / f"fps_compare_{timestamp}.png")
+
+            if len(state.graph_timestamps) > 0 and len(state.proc_ms_samples) > 0 and len(state.total_ms_samples) > 0:
+                x = state.graph_timestamps
+                proc = state.proc_ms_samples[:len(x)]
+                total = state.total_ms_samples[:len(x)]
+
+                plt.figure(figsize=(12, 6))
+                avg_total = float(np.mean(total)) if len(total) > 0 else 0.0
+                avg_proc = float(np.mean(proc)) if len(proc) > 0 else 0.0
+                plt.plot(x, total, linewidth=2, label=f"Celkový čas (priemer {avg_total:.1f} ms)")
+                plt.plot(x, proc, linewidth=2, label=f"Čas spracovania (priemer {avg_proc:.1f} ms)")
+                plt.xlabel("Čas (s)")
+                plt.ylabel("Čas spracovania (ms)")
+                plt.title("Porovnanie celkového času a času spracovania")
+                plt.grid(True, alpha=0.3)
+                plt.legend()
+                _save_current_plot(log_dir / f"total_vs_proc_{timestamp}.png")
+
+            if len(state.graph_timestamps) > 0:
+                x = state.graph_timestamps
+                series = [
+                    ("Získanie frame", state.capture_ms_samples),
+                    ("Red", state.red_ms_samples),
+                    ("Canny", state.canny_ms_samples),
+                    ("Ellipse", state.ellipse_ms_samples),
+                    ("Read sign", state.read_sign_ms_samples),
+                ]
+
+                plt.figure(figsize=(12, 6))
+                anything = False
+                for label, arr in series:
+                    arr2 = arr[:len(x)]
+                    if len(arr2) < len(x):
+                        arr2 = arr2 + [0.0] * (len(x) - len(arr2))
+                    if len(arr2) > 0:
+                        avg_stage = float(np.mean(arr2)) if len(arr2) > 0 else 0.0
+                        plt.plot(x, arr2, linewidth=2, label=f"{label} (priemer {avg_stage:.1f} ms)")
+                        anything = True
+                if anything:
+                    plt.xlabel("Čas (s)")
+                    plt.ylabel("Čas (ms)")
+                    plt.title("Porovnanie časov jednotlivých častí pipeline")
+                    plt.grid(True, alpha=0.3)
+                    plt.legend()
+                    _save_current_plot(log_dir / f"pipeline_times_{timestamp}.png")
+                else:
+                    plt.close()
+
+            if len(state.detection_events) > 0:
+                counts = Counter(state.detection_events)
+                label_map = {"No detection": "Bez detekcie", "No read": "Detekované, ale neprečítané"}
+                labels = [label_map.get(lbl, lbl) for lbl in counts.keys()]
+                values = list(counts.values())
+
+                plt.figure(figsize=(9, 9))
+                plt.pie(values, labels=labels, autopct="%1.1f%%", startangle=90)
+                plt.title("Rozdelenie detekcií")
+                _save_current_plot(log_dir / f"detection_pie_{timestamp}.png")
+
         except Exception as e:
             print(f"[MAIN] Graph error: {e}")
 
+    print("[MAIN] ============================================")
     print("[MAIN] ============================================")
     print(f"[MAIN] Frames: {state.frame_count}")
     if state.start_time is not None:

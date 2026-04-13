@@ -2,10 +2,6 @@
 # -*- coding: utf-8 -*-
 """
 VisionPilot XR - Simple Tkinter GUI + one-line terminal status
-- Small Tkinter preview window for visual control
-- One single updating terminal line:
-  Vehicle speed | Detection | Read sign
-- No cv2.imshow(), so no OpenCV Qt window backend spam
 """
 
 import os
@@ -23,18 +19,10 @@ from PIL import Image, ImageTk
 print(f"[INIT] LD_PRELOAD={os.environ.get('LD_PRELOAD', 'Not set')}")
 
 try:
-    import psutil
-except ImportError:
-    psutil = None
-
-try:
     import matplotlib.pyplot as plt
 except ImportError:
     plt = None
 
-# ---------------------------------------------------------
-# Imports
-# ---------------------------------------------------------
 try:
     from realsense import RealSenseCamera
     print("[INIT] RealSenseCamera: OK")
@@ -51,11 +39,14 @@ except Exception as e:
 
 try:
     from read_speed import PerceptronSpeedReader
+    print("[INIT] read_speed imported")
     _test = PerceptronSpeedReader()
+    print("[INIT] PerceptronSpeedReader test instance created")
     del _test
     print("[INIT] PerceptronSpeedReader: OK")
-except Exception:
+except Exception as e:
     print("[INIT] PerceptronSpeedReader FAILED:")
+    print(f"[INIT] Exact error: {type(e).__name__}: {e}")
     traceback.print_exc()
     print(
         "\n[INIT] NOTE: On Jetson, run via ./run_visionpilot.sh if torch needs LD_PRELOAD.\n"
@@ -74,6 +65,55 @@ except Exception as e:
 IS_WINDOWS = platform.system() == "Windows"
 IS_LINUX = platform.system() == "Linux"
 IS_JETSON = IS_LINUX and os.path.exists("/etc/nv_tegra_release")
+
+
+class JetsonCPUMonitor:
+    def __init__(self):
+        self.prev_total = None
+        self.prev_idle = None
+
+    def read(self):
+        try:
+            with open("/proc/stat", "r", encoding="utf-8") as f:
+                line = f.readline().strip()
+
+            parts = line.split()
+            if not parts or parts[0] != "cpu":
+                return 0.0
+
+            values = list(map(int, parts[1:]))
+
+            user = values[0]
+            nice = values[1]
+            system = values[2]
+            idle = values[3]
+            iowait = values[4] if len(values) > 4 else 0
+            irq = values[5] if len(values) > 5 else 0
+            softirq = values[6] if len(values) > 6 else 0
+            steal = values[7] if len(values) > 7 else 0
+
+            idle_all = idle + iowait
+            non_idle = user + nice + system + irq + softirq + steal
+            total = idle_all + non_idle
+
+            if self.prev_total is None or self.prev_idle is None:
+                self.prev_total = total
+                self.prev_idle = idle_all
+                return 0.0
+
+            total_diff = total - self.prev_total
+            idle_diff = idle_all - self.prev_idle
+
+            self.prev_total = total
+            self.prev_idle = idle_all
+
+            if total_diff <= 0:
+                return 0.0
+
+            cpu_percent = 100.0 * (1.0 - (idle_diff / total_diff))
+            return max(0.0, min(cpu_percent, 100.0))
+        except Exception:
+            return 0.0
 
 
 class State:
@@ -97,23 +137,36 @@ class State:
         self.cpu_samples = []
         self.timestamps = []
         self.last_display_time = 0.0
+        self.last_status_len = 0
+
+        self.last_cpu = 0.0
+        self.last_proc_ms = 0.0
+        self.last_capture_ms = 0.0
+        self.last_overlay_ms = 0.0
+        self.last_frame_ms = 0.0
+        self.last_fps = 0.0
+        self.prev_frame_end = None
+        self.cpu_monitor = JetsonCPUMonitor()
 
         self.tk_root = None
         self.tk_label = None
         self.tk_status = None
         self.tk_img = None
+        self.process_crop_ratio = 0.60  # match original gui.py style: top 3/5 of frame
 
 
 state = State()
 
 
 def get_cpu_usage():
-    if psutil is not None:
-        try:
-            return psutil.cpu_percent(interval=0.001)
-        except Exception:
-            pass
-    return 0.0
+    return state.cpu_monitor.read()
+
+
+def on_vehicle_speed(speed):
+    try:
+        state.vehicle_speed = int(speed)
+    except Exception:
+        pass
 
 
 def init_all():
@@ -126,7 +179,7 @@ def init_all():
         print("[MAIN] [NO] RealSenseCamera not available")
         return False
     try:
-        state.camera = RealSenseCamera(width=1920, height=1080, fps=30)
+        state.camera = RealSenseCamera(width=1280, height=720, fps=30)
         state.camera.start()
         print("[MAIN] [OK] Camera initialized")
     except Exception as e:
@@ -156,7 +209,13 @@ def init_all():
             state.speed_reader = PerceptronSpeedReader()
             state.processor.speed_reader = state.speed_reader
             state.processor.read_sign_enabled = True
-            print("[MAIN] [OK] MLP Reader initialized")
+
+            try:
+                dummy = np.zeros((64, 64, 3), dtype=np.uint8)
+                state.speed_reader.predict_from_crop(dummy)
+                print("[MAIN] [OK] MLP Reader initialized (warmed up)")
+            except Exception:
+                print("[MAIN] [OK] MLP Reader initialized")
         except Exception as e:
             print(f"[MAIN] [WARN] MLP Reader failed: {e}")
             state.speed_reader = None
@@ -166,7 +225,7 @@ def init_all():
         print("[MAIN] [WARN] ELM327 not available (optional)")
     else:
         try:
-            state.elm327_reader = ELM327SpeedReader()
+            state.elm327_reader = ELM327SpeedReader(callback=on_vehicle_speed)
             state.elm327_reader.start()
             print("[MAIN] [OK] ELM327 reader started")
         except Exception as e:
@@ -192,6 +251,17 @@ def build_overlay_frame(frame_bgr: np.ndarray) -> np.ndarray:
     cv2.putText(frame, f"Read sign: {read_sign_text} km/h", (20, 130),
                 cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 255), 2)
 
+    cv2.putText(frame, f"Proc: {state.last_proc_ms:6.2f} ms", (20, 175),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+    cv2.putText(frame, f"Cap: {state.last_capture_ms:6.2f} ms", (20, 210),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+    cv2.putText(frame, f"Total: {state.last_frame_ms:6.2f} ms", (20, 245),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+    cv2.putText(frame, f"FPS: {state.last_fps:5.1f}", (20, 280),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+    cv2.putText(frame, f"CPU: {state.last_cpu:5.1f}%", (20, 315),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+
     sc = state.sign_center
     if sc is not None:
         try:
@@ -211,8 +281,12 @@ def process_frame():
     if state.camera is None or state.processor is None:
         return False
 
+    frame_start = time.perf_counter()
+
     try:
+        t_cap = time.perf_counter()
         ok, frame = state.camera.read()
+        state.last_capture_ms = (time.perf_counter() - t_cap) * 1000.0
         if not ok or frame is None:
             return False
 
@@ -223,7 +297,6 @@ def process_frame():
         state.processor.enable_ellipse = True
         state.processor.read_sign_enabled = (state.speed_reader is not None)
 
-        # reset frame-local outputs if the processor uses persistent state
         try:
             state.processor.last_sign_center = None
         except Exception:
@@ -233,25 +306,57 @@ def process_frame():
         except Exception:
             pass
 
-        processed = state.processor.process(frame)
+        # Match original gui.py behavior: process only the top 3/5 of the frame.
+        frame_h, frame_w = frame.shape[:2]
+        crop_h = max(1, int(frame_h * state.process_crop_ratio))
+        proc_frame = frame[:crop_h, :]
 
-        state.sign_center = getattr(state.processor, "last_sign_center", None)
+        t_proc = time.perf_counter()
+        processed = state.processor.process(proc_frame)
+        state.last_proc_ms = (time.perf_counter() - t_proc) * 1000.0
+
+        raw_sign_center = getattr(state.processor, "last_sign_center", None)
+        if raw_sign_center is not None:
+            state.sign_center = raw_sign_center
+        else:
+            state.sign_center = None
+
         state.detected_sign = getattr(state.processor, "last_speed", None)
-
-        # Detection = ellipse/sign localization found
         state.sign_detected_status = state.sign_center is not None
 
-        # Use processed image if returned, otherwise overlay original
+        # Build a full-size preview frame while only showing processed result in the top crop area.
+        base = frame.copy()
         if isinstance(processed, np.ndarray) and processed.size > 0:
             if len(processed.shape) == 2:
                 processed = cv2.cvtColor(processed, cv2.COLOR_GRAY2BGR)
-            base = processed
-        else:
-            base = frame
+            try:
+                if processed.shape[:2] == proc_frame.shape[:2]:
+                    base[:crop_h, :] = processed
+                else:
+                    resized_processed = cv2.resize(processed, (frame_w, crop_h), interpolation=cv2.INTER_AREA)
+                    base[:crop_h, :] = resized_processed
+            except Exception:
+                pass
 
+        t_ov = time.perf_counter()
         state.preview_frame = build_overlay_frame(base)
+        state.last_overlay_ms = (time.perf_counter() - t_ov) * 1000.0
+
+        frame_end = time.perf_counter()
+        state.last_frame_ms = (frame_end - frame_start) * 1000.0
+
+        if state.prev_frame_end is not None:
+            dt = frame_end - state.prev_frame_end
+            if dt > 0:
+                instant_fps = 1.0 / dt
+                if state.last_fps <= 0:
+                    state.last_fps = instant_fps
+                else:
+                    state.last_fps = 0.85 * state.last_fps + 0.15 * instant_fps
+        state.prev_frame_end = frame_end
 
         cpu = get_cpu_usage()
+        state.last_cpu = cpu
         if cpu >= 0:
             state.cpu_samples.append(cpu)
             state.timestamps.append(time.time() - state.start_time)
@@ -266,7 +371,7 @@ def process_frame():
 
 def display_status():
     now = time.time()
-    if now - state.last_display_time < 0.1:
+    if now - state.last_display_time < 0.15:
         return
 
     state.last_display_time = now
@@ -274,20 +379,40 @@ def display_status():
     detected_text = "Yes" if state.sign_detected_status else "No"
     read_sign_text = str(state.detected_sign) if state.detected_sign is not None else "--"
 
+    # Keep terminal status SHORT so it never wraps in a normal terminal width.
     status = (
-        f"Vehicle speed: {state.vehicle_speed} km/h | "
-        f"Detection: {detected_text} | "
-        f"Read sign: {read_sign_text} km/h"
+        f"V:{state.vehicle_speed:>3} "
+        f"D:{detected_text[0]} "
+        f"S:{read_sign_text:>3} "
+        f"P:{state.last_proc_ms:4.0f} "
+        f"C:{state.last_capture_ms:4.0f} "
+        f"T:{state.last_frame_ms:4.0f} "
+        f"F:{state.last_fps:4.1f} "
+        f"CPU:{state.last_cpu:4.0f}"
     )
-
-    sys.stdout.write("\r" + status.ljust(100))
-    sys.stdout.flush()
 
     if state.tk_status is not None:
         try:
-            state.tk_status.config(text=status)
+            gui_status = (
+                f"Vehicle speed: {state.vehicle_speed} km/h | "
+                f"Detection: {detected_text} | "
+                f"Read sign: {read_sign_text} km/h | "
+                f"Proc: {state.last_proc_ms:6.2f} ms | "
+                f"Cap: {state.last_capture_ms:6.2f} ms | "
+                f"Total: {state.last_frame_ms:6.2f} ms | "
+                f"FPS: {state.last_fps:5.1f} | "
+                f"CPU: {state.last_cpu:5.1f}% | "
+                f"Crop: top {int(state.process_crop_ratio*100)}%"
+            )
+            state.tk_status.configure(text=gui_status)
         except Exception:
             pass
+
+    # Strict single-line overwrite.
+    # Use carriage return + ANSI clear-to-end-of-line so only one terminal row is reused.
+    sys.stdout.write("\r\033[K" + status)
+    sys.stdout.flush()
+    state.last_status_len = len(status)
 
 
 def on_tk_close():
@@ -304,7 +429,7 @@ def init_tk():
 
     title = tk.Label(
         root,
-        text="VisionPilot XR",
+        text="VisionPilot XR (HD 1280x720)",
         font=("Arial", 16, "bold"),
         fg="white",
         bg="#101010"
@@ -316,7 +441,9 @@ def init_tk():
         text="Waiting for frames...",
         font=("Consolas", 11),
         fg="#7CFC90",
-        bg="#101010"
+        bg="#101010",
+        wraplength=940,
+        justify="left"
     )
     status.pack(pady=(0, 8))
 

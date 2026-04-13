@@ -2,15 +2,10 @@
 # -*- coding: utf-8 -*-
 """
 VisionPilot XR - Simple Tkinter GUI + one-line terminal status
-
-Features:
 - Small Tkinter preview window for visual control
-- Terminal shows only ONE updating line during runtime:
+- One single updating terminal line:
   Vehicle speed | Detection | Read sign
-- ESC closes the app
-- CPU graph is saved to PNG on shutdown, but never shown in a popup
-- No cv2.imshow()
-- No PIL/ImageTk dependency
+- No cv2.imshow(), so no OpenCV Qt window backend spam
 """
 
 import os
@@ -23,6 +18,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+from PIL import Image, ImageTk
 
 print(f"[INIT] LD_PRELOAD={os.environ.get('LD_PRELOAD', 'Not set')}")
 
@@ -55,11 +51,14 @@ except Exception as e:
 
 try:
     from read_speed import PerceptronSpeedReader
+    print("[INIT] read_speed imported")
     _test = PerceptronSpeedReader()
+    print("[INIT] PerceptronSpeedReader test instance created")
     del _test
     print("[INIT] PerceptronSpeedReader: OK")
-except Exception:
+except Exception as e:
     print("[INIT] PerceptronSpeedReader FAILED:")
+    print(f"[INIT] Exact error: {type(e).__name__}: {e}")
     traceback.print_exc()
     print(
         "\n[INIT] NOTE: On Jetson, run via ./run_visionpilot.sh if torch needs LD_PRELOAD.\n"
@@ -101,14 +100,12 @@ class State:
         self.cpu_samples = []
         self.timestamps = []
         self.last_display_time = 0.0
+        self.last_status_text = ""
 
         self.tk_root = None
-        self.tk_canvas = None
+        self.tk_label = None
         self.tk_status = None
         self.tk_img = None
-        self.canvas_img_id = None
-
-        self.last_error_text = None
 
 
 state = State()
@@ -181,7 +178,7 @@ def init_all():
             state.elm327_reader = None
 
     print("\n[MAIN] [OK] All components ready!")
-    print("[MAIN] Close window, press ESC, or Ctrl+C to stop.\n")
+    print("[MAIN] Close the Tk window or press Ctrl+C to stop.\n")
     return True
 
 
@@ -230,6 +227,7 @@ def process_frame():
         state.processor.enable_ellipse = True
         state.processor.read_sign_enabled = (state.speed_reader is not None)
 
+        # reset frame-local outputs if the processor uses persistent state
         try:
             state.processor.last_sign_center = None
         except Exception:
@@ -244,9 +242,10 @@ def process_frame():
         state.sign_center = getattr(state.processor, "last_sign_center", None)
         state.detected_sign = getattr(state.processor, "last_speed", None)
 
-        # Detection = localization found, Read sign = MLP value
+        # Detection = ellipse/sign localization found
         state.sign_detected_status = state.sign_center is not None
 
+        # Use processed image if returned, otherwise overlay original
         if isinstance(processed, np.ndarray) and processed.size > 0:
             if len(processed.shape) == 2:
                 processed = cv2.cvtColor(processed, cv2.COLOR_GRAY2BGR)
@@ -265,8 +264,7 @@ def process_frame():
         return True
 
     except Exception as e:
-        # no spam during runtime; keep last error only
-        state.last_error_text = str(e)
+        print(f"\n[ERROR] Frame processing: {e}")
         return False
 
 
@@ -286,15 +284,9 @@ def display_status():
         f"Read sign: {read_sign_text} km/h"
     )
 
-    # exactly one updating terminal line
-    sys.stdout.write("\r" + status.ljust(120))
+    # ✅ ANSI escape → spoľahlivé prepisovanie riadku
+    sys.stdout.write("\033[2K\r" + status)
     sys.stdout.flush()
-
-    if state.tk_status is not None:
-        try:
-            state.tk_status.config(text=status)
-        except Exception:
-            pass
 
 
 def on_tk_close():
@@ -308,7 +300,6 @@ def init_tk():
     root.minsize(820, 540)
     root.configure(bg="#101010")
     root.protocol("WM_DELETE_WINDOW", on_tk_close)
-    root.bind("<Escape>", lambda event: on_tk_close())
 
     title = tk.Label(
         root,
@@ -328,17 +319,16 @@ def init_tk():
     )
     status.pack(pady=(0, 8))
 
-    canvas = tk.Canvas(root, bg="black", highlightthickness=0)
-    canvas.pack(fill="both", expand=True, padx=10, pady=10)
+    label = tk.Label(root, bg="black")
+    label.pack(fill="both", expand=True, padx=10, pady=10)
 
     state.tk_root = root
-    state.tk_canvas = canvas
+    state.tk_label = label
     state.tk_status = status
-    state.canvas_img_id = None
 
 
 def update_gui_frame():
-    if state.tk_root is None or state.tk_canvas is None:
+    if state.tk_root is None or state.tk_label is None:
         return
 
     frame = state.preview_frame
@@ -346,11 +336,11 @@ def update_gui_frame():
         return
 
     try:
-        canvas_w = max(640, state.tk_canvas.winfo_width())
-        canvas_h = max(360, state.tk_canvas.winfo_height())
-
         h, w = frame.shape[:2]
-        scale = min(canvas_w / float(w), canvas_h / float(h))
+        max_w = max(640, state.tk_label.winfo_width())
+        max_h = max(360, state.tk_label.winfo_height())
+
+        scale = min(max_w / float(w), max_h / float(h))
         if scale <= 0:
             scale = 1.0
 
@@ -360,25 +350,17 @@ def update_gui_frame():
         resized = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
         rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
 
-        # No PIL needed: encode to PPM and load via Tk PhotoImage
-        ok, buf = cv2.imencode(".ppm", rgb)
-        if not ok:
-            return
+        pil_img = Image.fromarray(rgb)
+        tk_img = ImageTk.PhotoImage(image=pil_img)
 
-        img = tk.PhotoImage(data=buf.tobytes())
-        state.tk_img = img
-
-        state.tk_canvas.delete("all")
-        x = canvas_w // 2
-        y = canvas_h // 2
-        state.tk_canvas.create_image(x, y, image=img, anchor="center")
-
+        state.tk_img = tk_img
+        state.tk_label.configure(image=tk_img)
     except Exception:
         pass
 
 
 def run():
-    print("[MAIN] Starting main loop...")
+    print("[MAIN] Starting main loop...\n")
 
     state.running = True
     state.start_time = time.time()
@@ -400,8 +382,9 @@ def run():
             time.sleep(0.001)
 
     except KeyboardInterrupt:
-        state.running = False
+        pass
     finally:
+        state.running = False
         try:
             if state.tk_root is not None:
                 state.tk_root.destroy()
@@ -410,10 +393,7 @@ def run():
 
 
 def shutdown():
-    # clear the one-line runtime status cleanly
-    sys.stdout.write("\r" + " " * 140 + "\r")
-    sys.stdout.flush()
-    print()
+    print("\n")
 
     if state.camera is not None:
         try:
@@ -444,7 +424,6 @@ def shutdown():
             log_dir.mkdir(exist_ok=True)
             graph_file = log_dir / f"cpu_graph_{time.strftime('%Y-%m-%d_%H-%M-%S')}.png"
             plt.savefig(str(graph_file), dpi=100)
-            plt.close()
             print(f"[MAIN] Graph saved: {graph_file}")
         except Exception as e:
             print(f"[MAIN] Graph error: {e}")
