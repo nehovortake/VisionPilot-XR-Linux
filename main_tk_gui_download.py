@@ -51,14 +51,11 @@ except Exception as e:
 
 try:
     from read_speed import PerceptronSpeedReader
-    print("[INIT] read_speed imported")
     _test = PerceptronSpeedReader()
-    print("[INIT] PerceptronSpeedReader test instance created")
     del _test
     print("[INIT] PerceptronSpeedReader: OK")
-except Exception as e:
+except Exception:
     print("[INIT] PerceptronSpeedReader FAILED:")
-    print(f"[INIT] Exact error: {type(e).__name__}: {e}")
     traceback.print_exc()
     print(
         "\n[INIT] NOTE: On Jetson, run via ./run_visionpilot.sh if torch needs LD_PRELOAD.\n"
@@ -100,7 +97,6 @@ class State:
         self.cpu_samples = []
         self.timestamps = []
         self.last_display_time = 0.0
-        self.last_status_text = ""
 
         self.tk_root = None
         self.tk_label = None
@@ -284,9 +280,14 @@ def display_status():
         f"Read sign: {read_sign_text} km/h"
     )
 
-    # ✅ ANSI escape → spoľahlivé prepisovanie riadku
-    sys.stdout.write("\033[2K\r" + status)
+    sys.stdout.write("\r" + status.ljust(100))
     sys.stdout.flush()
+
+    if state.tk_status is not None:
+        try:
+            state.tk_status.config(text=status)
+        except Exception:
+            pass
 
 
 def on_tk_close():
