@@ -39,15 +39,22 @@ except Exception as e:
 
 SCRIPT_ROOT = Path(__file__).resolve().parent
 DATASET_ROOT = SCRIPT_ROOT / "dataset"
+
 MODEL_PATHS = [
     DATASET_ROOT / "mlp_speed_model_dataset_split.pt",
     DATASET_ROOT / "mlp_speed_model.pt",
 ]
 MODEL_PATH = next((p for p in MODEL_PATHS if p.exists()), MODEL_PATHS[0])
 
+
+# ======================================================
+# ZMENA:
+# Pouzivame iba default crop.
+# Vypnuty je "three_pad", lebo pri natocenej 30 km/h znacke
+# vedel zvyhodnit triedy 100/110/130.
+# ======================================================
 RUNTIME_PREPROCESS_VARIANTS = [
     ("default", {"inner_scale": None, "focus_scale": None, "crop_mode": "crop"}),
-    ("three_pad", {"inner_scale": 1.00, "focus_scale": 1.00, "crop_mode": "pad"}),
 ]
 
 
@@ -128,13 +135,19 @@ class PerceptronSpeedReader:
         self.model = None
         self.labels: list[int] | None = None
         self.img_size: int = 64
+
         self.inner_scale: float = 0.75
         self.focus_scale: float = 0.90
+
         self.pred_hist = deque(maxlen=7)
         self.last_stable: int | None = None
-        self.min_margin = 0.35
+
+        # Prisnejsie odmietanie neistych predikcii.
+        # Ak model nie je velmi isty, vrati None => GUI ukaze "--".
+        self.min_softmax_prob = 0.80
+        self.min_margin = 0.45
         self.min_votes = 4
-        self.min_softmax_prob = 0.9
+
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self._load_model(model_path)
 
@@ -149,9 +162,12 @@ class PerceptronSpeedReader:
 
         self.labels = [int(x) for x in class_labels]
         self.img_size = int(checkpoint.get("img_size", 64))
+
         self.model = SpeedMLP(num_classes=len(self.labels))
         state = checkpoint["state_dict"]
 
+        # Kompatibilita so starsim ulozenym modelom:
+        # train_mlp pouziva fc1/fc2, runtime model pouziva net.0/net.2
         if ("fc1.weight" in state) and ("net.0.weight" not in state):
             state = {
                 "net.0.weight": state["fc1.weight"],
@@ -163,7 +179,15 @@ class PerceptronSpeedReader:
         self.model.load_state_dict(state, strict=True)
         self.model = self.model.to(self.device)
         self.model.eval()
-        print(f"[MLP] Loaded | classes={self.labels} | img={self.img_size} | device={self.device} | model={path.name}")
+
+        print(
+            f"[MLP] Loaded | classes={self.labels} | img={self.img_size} "
+            f"| device={self.device} | model={path.name}"
+        )
+        print(
+            f"[MLP] Runtime filters | min_prob={self.min_softmax_prob:.2f} "
+            f"| min_margin={self.min_margin:.2f} | min_votes={self.min_votes}"
+        )
 
     @staticmethod
     def _margin_top1_top2(logits_1d: np.ndarray) -> float:
@@ -171,15 +195,27 @@ class PerceptronSpeedReader:
             return -1e9
         if logits_1d.size == 1:
             return float(logits_1d[0])
+
         top2 = np.partition(logits_1d, -2)[-2:]
         return float(top2.max() - top2.min())
+
+    def _reject_prediction(self) -> None:
+        """
+        Pri odmietnutej predikcii nedrzime staru rychlost nasilu.
+        Inak by po zlej detekcii ostala v GUI stara hodnota.
+        """
+        self.pred_hist.clear()
+        self.last_stable = None
 
     def predict_from_crop(self, crop_bgr: np.ndarray) -> int | None:
         try:
             if crop_bgr is None or crop_bgr.size == 0:
-                return self.last_stable
+                self._reject_prediction()
+                return None
+
             if self.model is None or self.labels is None:
-                return self.last_stable
+                self._reject_prediction()
+                return None
 
             best_label: int | None = None
             best_margin: float = -1e9
@@ -207,6 +243,7 @@ class PerceptronSpeedReader:
                     out = self.model(x_tensor)
 
                 logits = out.squeeze(0).detach().cpu().numpy()
+
                 exp_logits = np.exp(logits - logits.max())
                 probs = exp_logits / exp_logits.sum()
 
@@ -221,22 +258,35 @@ class PerceptronSpeedReader:
                     best_prob = top_prob
 
             if best_label is None:
-                return self.last_stable
-            if best_prob < self.min_softmax_prob:
-                return self.last_stable
-            if best_margin < self.min_margin:
-                return self.last_stable
+                self._reject_prediction()
+                return None
 
+            # Confidence filter
+            if best_prob < self.min_softmax_prob:
+                self._reject_prediction()
+                return None
+
+            # Margin filter - pomaha pri zamenach 30 <-> 100 a podobne
+            if best_margin < self.min_margin:
+                self._reject_prediction()
+                return None
+
+            # Temporal voting - predikcia musi byt stabilna cez viac framov
             self.pred_hist.append(best_label)
+
             counts: dict[int, int] = {}
             for v in self.pred_hist:
                 counts[v] = counts.get(v, 0) + 1
+
             winner, votes = max(counts.items(), key=lambda kv: kv[1])
+
             if votes < self.min_votes:
                 return self.last_stable
 
             self.last_stable = winner
             return self.last_stable
+
         except Exception as e:
             print(f"[MLP] Prediction error: {e}")
-            return self.last_stable
+            self._reject_prediction()
+            return None
